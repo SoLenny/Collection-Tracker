@@ -1,4 +1,4 @@
-const VERSION = "v4.1.1";
+const VERSION = "v4.1.2";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -136,7 +136,11 @@ const els = {
   partFilter: $("#partFilter"),
   fileImage: $("#fileImage"),
   btnUndo: $("#btnUndo"),
+  btnDeletePart: $("#btnDeletePart"),
   btnDeleteSeries: $("#btnDeleteSeries"),
+
+  dropzone: $("#dropzone"),
+  seriesLeftcol: $("#seriesLeftcol"),
 
   cardsList: $("#cardsList"),
 
@@ -419,6 +423,8 @@ async function openSeries(seriesId){
     localStorage.setItem("ct_last_part_"+seriesId, state.activePartId);
   }
 
+  updatePartsUIVisibility();
+  updateDropzoneVisibility();
   renderPartSelect();
   renderPartFilter();
   await loadActivePartImage();
@@ -448,7 +454,6 @@ function renderPartSelect(){
   els.partSelect.value = state.activePartId || state.parts[0].id;
 }
 function renderPartFilter(){
-  // This select mirrors the active part (no filtering). It allows switching canvas image.
   els.partFilter.innerHTML = "";
   if (!state.parts.length){
     const o = document.createElement("option");
@@ -466,6 +471,17 @@ function renderPartFilter(){
     els.partFilter.appendChild(o);
   }
   els.partFilter.value = state.activePartId || state.parts[0].id;
+}
+
+function updatePartsUIVisibility(){
+  const hide = state.parts.length <= 1;
+  els.seriesView.classList.toggle("parts-hidden", hide);
+  els.btnDeletePart.disabled = state.parts.length === 0;
+}
+
+function updateDropzoneVisibility(){
+  const empty = state.parts.length === 0;
+  els.seriesLeftcol.classList.toggle("leftcol--empty", empty);
 }
 
 async function loadActivePartImage(){
@@ -520,6 +536,73 @@ async function addPartFromFile(file){
   await loadActivePartImage();
   resizeCanvasAndRedraw();
   draw();
+}
+
+async function addPartsFromFiles(files){
+  const list = Array.from(files || []).filter(f => f && f.type && f.type.startsWith("image/"));
+  if (!list.length) return;
+  for (const file of list){
+    await addPartFromFile(file);
+  }
+  updatePartsUIVisibility();
+  updateDropzoneVisibility();
+}
+
+async function deletePart(partId){
+  if (!partId) return;
+  const part = state.parts.find(p=>p.id===partId);
+  if (!part) return;
+  const ok = await confirmDialog(
+    "Удалить часть?",
+    `Часть ${part.index} и все её открытки будут удалены.`,
+    "Удалить"
+  );
+  if (!ok) return;
+
+  const cardsToDelete = state.cards.filter(c=>c.partId===partId);
+  for (const c of cardsToDelete) await db.delete("cards", c.id);
+  await db.delete("parts", partId);
+
+  state.cards = state.cards.filter(c=>c.partId!==partId);
+  const removedIndex = state.parts.findIndex(p=>p.id===partId);
+  state.parts = state.parts.filter(p=>p.id!==partId);
+  state.parts.sort((a,b)=>a.index-b.index);
+
+  for (let i=0; i<state.parts.length; i++){
+    const p = state.parts[i];
+    const nextIndex = i + 1;
+    if (p.index !== nextIndex || p.title !== `Часть ${nextIndex}`){
+      p.index = nextIndex;
+      p.title = `Часть ${nextIndex}`;
+      p.updatedAt = Date.now();
+      await db.put("parts", p);
+    }
+  }
+
+  if (state.activePartId === partId){
+    if (state.parts.length){
+      const next = state.parts[Math.min(removedIndex, state.parts.length-1)];
+      state.activePartId = next?.id || null;
+    } else {
+      state.activePartId = null;
+    }
+    if (state.activeSeriesId){
+      if (state.activePartId){
+        localStorage.setItem("ct_last_part_"+state.activeSeriesId, state.activePartId);
+      } else {
+        localStorage.removeItem("ct_last_part_"+state.activeSeriesId);
+      }
+    }
+  }
+
+  updatePartsUIVisibility();
+  updateDropzoneVisibility();
+  await touchSeriesUpdated();
+  renderPartSelect();
+  renderPartFilter();
+  await loadActivePartImage();
+  refreshStatsAndRender();
+  resizeCanvasAndRedraw();
 }
 
 /* ---------- Stats + list ---------- */
@@ -1164,13 +1247,16 @@ function initEvents(){
   });
 
   els.fileImage.addEventListener("change", async () => {
-    const f = els.fileImage.files?.[0];
-    if (!f) return;
-    await addPartFromFile(f);
+    if (!els.fileImage.files?.length) return;
+    await addPartsFromFiles(els.fileImage.files);
     els.fileImage.value = "";
   });
 
   els.btnUndo.addEventListener("click", undoLastInActivePart);
+  els.btnDeletePart.addEventListener("click", async () => {
+    if (!state.activePartId) return;
+    await deletePart(state.activePartId);
+  });
   els.btnDeleteSeries.addEventListener("click", deleteActiveSeries);
 
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -1179,6 +1265,39 @@ function initEvents(){
   canvas.addEventListener("pointercancel", onPointerUp);
 
   window.addEventListener("resize", () => resizeCanvasAndRedraw());
+
+  let dragDepth = 0;
+  const handleDragEnter = (evt) => {
+    if (!evt.dataTransfer?.types?.includes("Files")) return;
+    evt.preventDefault();
+    dragDepth += 1;
+    if (state.parts.length === 0){
+      els.seriesLeftcol.classList.add("is-dragover");
+    }
+  };
+  const handleDragLeave = (evt) => {
+    if (!evt.dataTransfer?.types?.includes("Files")) return;
+    evt.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0){
+      els.seriesLeftcol.classList.remove("is-dragover");
+    }
+  };
+  const handleDragOver = (evt) => {
+    if (!evt.dataTransfer?.types?.includes("Files")) return;
+    evt.preventDefault();
+  };
+  const handleDrop = async (evt) => {
+    if (!evt.dataTransfer?.files?.length) return;
+    evt.preventDefault();
+    dragDepth = 0;
+    els.seriesLeftcol.classList.remove("is-dragover");
+    await addPartsFromFiles(evt.dataTransfer.files);
+  };
+  els.seriesView.addEventListener("dragenter", handleDragEnter);
+  els.seriesView.addEventListener("dragleave", handleDragLeave);
+  els.seriesView.addEventListener("dragover", handleDragOver);
+  els.seriesView.addEventListener("drop", handleDrop);
 }
 
 /* ---------- Boot ---------- */

@@ -86,17 +86,22 @@
 
               <label class="btn">
                 ＋ Добавить изображение
-                <input id="fileImage" type="file" accept="image/*" />
+                <input id="fileImage" type="file" accept="image/*" multiple />
               </label>
 
               <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение в текущей части">↶ Отменить</button>
+              <button id="btnDeletePart" class="btn danger ghost" title="Удалить текущую часть">Удалить часть</button>
               <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
             </div>
           </div>
         </div>
 
         <div class="board">
-          <div class="leftcol">
+          <div class="leftcol" id="seriesLeftcol">
+            <div class="dropzone" id="dropzone">
+              <div class="dropzone-title">Перетащи изображения сюда или нажми «Добавить изображение»</div>
+              <div class="dropzone-sub">Можно загрузить сразу несколько файлов.</div>
+            </div>
             <div class="canvas-wrap">
               <canvas id="canvas" width="1200" height="800"></canvas>
             </div>
@@ -120,7 +125,7 @@
                 </div>
 
                 <div class="part-filter">
-                  <span class="part-label">Часть</span>
+                  <span class="part-label">Фильтр: Часть</span>
                   <select id="partFilter" class="select"></select>
                 </div>
               </div>
@@ -174,6 +179,6 @@
   </dialog>
 
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v4.1.1</div>
+  <div class="version-badge" id="versionBadge">v4.1.2</div>
 </body>
 </html>
