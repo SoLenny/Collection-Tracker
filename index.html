@@ -10,15 +10,15 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
+    <div class="brand" id="btnHomeBrand" title="На главную">
       <div class="logo" aria-hidden="true">✦</div>
       <div>
         <div class="title">Collection Tracker</div>
         <div class="subtitle">Открытки • обмены • получение</div>
       </div>
     </div>
-
     <div class="topbar-actions">
+      <button id="btnHome" class="btn ghost" title="Главная">Главная</button>
       <button id="btnExport" class="btn ghost" title="Экспорт данных в JSON">Экспорт</button>
       <label class="btn ghost file">
         Импорт
@@ -35,27 +35,35 @@
           <div class="panel-title">Серии</div>
           <button id="btnNewSeries" class="btn primary">＋ Добавить</button>
         </div>
-
         <div id="seriesList" class="series-list" role="list"></div>
-
         <div class="hint">
-          <div class="hint-title">Как пользоваться</div>
+          <div class="hint-title">Быстро</div>
           <ol>
-            <li>Создай серию → загрузи картинку.</li>
-            <li>Выделяй открытки рамкой (мышкой или пальцем).</li>
-            <li>Ставь галочки “Нашла обмен” и “Получено”.</li>
+            <li>Создай серию.</li>
+            <li>Добавь изображение (это будет <b>Часть 1</b>).</li>
+            <li>Выделяй открытки рамкой, отмечай статус и добавляй примечания.</li>
           </ol>
-          <div class="hint-small">Данные хранятся на устройстве (IndexedDB). Для синхронизации позже добавим аккаунт/облако.</div>
+          <div class="hint-small">Данные хранятся на устройстве (IndexedDB). Экспорт/импорт — для бэкапов и переноса.</div>
         </div>
       </div>
     </aside>
 
     <section class="workspace">
-      <div id="emptyState" class="empty">
-        <div class="empty-card">
-          <div class="empty-title">Добавь первую серию</div>
-          <div class="empty-text">Это локальное веб‑приложение. Откроется и на телефоне через GitHub Pages. Без авторизации — пока 🙂</div>
+      <div id="homeView" class="home">
+        <div class="home-head">
+          <div>
+            <div class="home-title">Мои серии</div>
+            <div class="home-sub">Кликни на серию, чтобы открыть. Прогресс считается по отмеченным открыткам.</div>
+          </div>
           <button id="btnNewSeries2" class="btn primary">＋ Добавить серию</button>
+        </div>
+        <div id="homeGrid" class="home-grid"></div>
+        <div id="homeEmpty" class="home-empty hidden">
+          <div class="empty-card">
+            <div class="empty-title">Добавь первую серию</div>
+            <div class="empty-text">Трекер работает как сайт. Можно открыть и на телефоне по ссылке GitHub Pages.</div>
+            <button id="btnNewSeries3" class="btn primary">＋ Добавить серию</button>
+          </div>
         </div>
       </div>
 
@@ -67,18 +75,27 @@
           </div>
 
           <div class="series-actions">
+            <div class="part-picker">
+              <span class="part-label">Часть</span>
+              <select id="partSelect" class="select"></select>
+            </div>
+
             <label class="btn">
-              Загрузить изображение
+              ＋ Добавить изображение
               <input id="fileImage" type="file" accept="image/*" />
             </label>
-            <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение">↶ Отменить</button>
+
+            <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение в текущей части">↶ Отменить</button>
             <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
           </div>
         </div>
 
         <div class="board">
-          <div class="canvas-wrap">
-            <canvas id="canvas" width="1200" height="800"></canvas>
+          <div class="leftcol">
+            <div class="canvas-wrap">
+              <canvas id="canvas" width="1200" height="800"></canvas>
+            </div>
+
             <div class="canvas-help" id="canvasHelp">
               <div><b>Выделение:</b> потяни рамку по открытке (мышкой или пальцем).</div>
               <div><b>Редактирование:</b> пока только удалить/переделать (выдели заново).</div>
@@ -88,13 +105,22 @@
           <div class="cards">
             <div class="cards-head">
               <div class="cards-title">Открытки</div>
-              <div class="chips">
-                <button class="chip active" data-filter="all">Все</button>
-                <button class="chip" data-filter="trade">Нашла обмен</button>
-                <button class="chip" data-filter="received">Получено</button>
-                <button class="chip" data-filter="pending">Жду</button>
+
+              <div class="cards-controls">
+                <div class="chips">
+                  <button class="chip active" data-filter="all">Все</button>
+                  <button class="chip" data-filter="trade">Нашла обмен</button>
+                  <button class="chip" data-filter="received">Получено</button>
+                  <button class="chip" data-filter="pending">Жду</button>
+                </div>
+
+                <div class="part-filter">
+                  <span class="part-label">Часть</span>
+                  <select id="partFilter" class="select"></select>
+                </div>
               </div>
             </div>
+
             <div id="cardsList" class="cards-list"></div>
           </div>
         </div>
@@ -106,14 +132,25 @@
     <form method="dialog" class="dialog-card">
       <div class="dialog-title">Новая серия</div>
       <label class="field">
-        <span>Название</span>
-        <input id="newSeriesName" type="text" placeholder="Например: Winx Set 1" required />
+        <span>Название (необязательно)</span>
+        <input id="newSeriesName" type="text" placeholder="Можно оставить пустым" />
       </label>
       <div class="dialog-actions">
-        <button class="btn ghost" value="cancel">Отмена</button>
+        <button class="btn ghost" value="cancel" formnovalidate>Отмена</button>
         <button id="btnCreateSeries" class="btn primary" value="ok">Создать</button>
       </div>
-      <div class="dialog-small">Картинку можно загрузить сразу после создания.</div>
+      <div class="dialog-small">Название можно изменить позже.</div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgConfirm" class="dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-title" id="confirmTitle">Подтвердить</div>
+      <div class="dialog-text" id="confirmText">—</div>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Отмена</button>
+        <button class="btn danger" id="confirmOk" value="ok">Удалить</button>
+      </div>
     </form>
   </dialog>
 
@@ -121,10 +158,9 @@
     <form method="dialog" class="dialog-card">
       <div class="dialog-title">Справка</div>
       <div class="dialog-text">
-        <p><b>Добавление открыток:</b> потяни рамку на картинке серии — появится карточка справа.</p>
-        <p><b>Данные:</b> сохраняются на этом устройстве в IndexedDB.</p>
-        <p><b>Экспорт/импорт:</b> используй кнопки вверху, чтобы делать резервные копии или переносить данные.</p>
-        <p><b>Планы:</b> позже можно добавить авторизацию/синхронизацию и “умное” авто‑распознавание.</p>
+        <p><b>Части:</b> в одной серии может быть несколько изображений (Часть 1, Часть 2...).</p>
+        <p><b>Добавление открыток:</b> потяни рамку на изображении — появится карточка справа.</p>
+        <p><b>Данные:</b> сохраняются на этом устройстве (IndexedDB). Для переноса используй Экспорт/Импорт.</p>
       </div>
       <div class="dialog-actions">
         <button class="btn primary" value="ok">Ок</button>
