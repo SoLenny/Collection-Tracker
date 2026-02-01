@@ -69,24 +69,29 @@
 
       <div id="seriesView" class="series-view hidden">
         <div class="series-toolbar">
-          <div class="series-meta">
+          <div class="series-group series-group--left">
             <input id="seriesName" class="series-name" type="text" placeholder="Название серии" />
+          </div>
+
+          <div class="series-group series-group--center">
             <div class="series-stats" id="seriesStats">—</div>
           </div>
 
-          <div class="series-actions">
-            <div class="part-picker">
-              <span class="part-label">Часть</span>
-              <select id="partSelect" class="select"></select>
+          <div class="series-group series-group--right">
+            <div class="series-actions">
+              <div class="part-picker">
+                <span class="part-label">Часть</span>
+                <select id="partSelect" class="select"></select>
+              </div>
+
+              <label class="btn">
+                ＋ Добавить изображение
+                <input id="fileImage" type="file" accept="image/*" />
+              </label>
+
+              <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение в текущей части">↶ Отменить</button>
+              <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
             </div>
-
-            <label class="btn">
-              ＋ Добавить изображение
-              <input id="fileImage" type="file" accept="image/*" />
-            </label>
-
-            <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение в текущей части">↶ Отменить</button>
-            <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
           </div>
         </div>
 
