@@ -18,8 +18,8 @@
 }
 
 *{box-sizing:border-box}
-html,body{height:100%}
-body{
+html,body{color-scheme:dark;height:100%}
+body{color-scheme:dark;
   margin:0;
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans";
   color:var(--text);
@@ -117,6 +117,9 @@ a{color:inherit}
   background:rgba(255,255,255,0.03);
   color:var(--muted);
 }
+.badge.dim{opacity:0.55;}
+.progress-badge{font-variant-numeric:tabular-nums;}
+
 .hint{padding:12px 14px 14px; border-top:1px solid var(--border); color:var(--muted)}
 .hint-title{font-weight:700; color:var(--text); margin-bottom:6px}
 .hint ol{margin:6px 0 0 18px; padding:0}
@@ -174,7 +177,7 @@ label.file input{display:none}
 .home-thumb{height:140px; background:rgba(0,0,0,0.25); border-bottom:1px solid var(--border); display:grid; place-items:center; overflow:hidden;}
 .home-thumb img{width:100%; height:100%; object-fit:cover; opacity:0.95}
 .home-thumb .ph{font-size:22px; color:rgba(255,255,255,0.75); font-weight:900}
-.home-body{padding:12px 12px 14px;}
+.home-body{color-scheme:dark;padding:12px 12px 14px;}
 .home-name{font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 .home-meta{margin-top:8px; display:flex; justify-content:space-between; gap:10px; color:var(--muted); font-size:12px;}
 .progress{margin-top:10px; height:10px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.10); border-radius:999px; overflow:hidden;}
@@ -365,3 +368,13 @@ label.file input{display:none}
   .cards-list{max-height:none;}
   .home-grid{grid-template-columns:1fr;}
 }
+
+
+/* --- version badge --- */
+.version-badge{position:fixed;left:14px;bottom:12px;font-size:12px;letter-spacing:0.2px;color:rgba(255,255,255,0.55);opacity:0.75;pointer-events:none;z-index:9999;text-shadow:0 1px 10px rgba(0,0,0,0.35)}
+
+select, .select{background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.92);}
+select option{background:#0b0b10;color:rgba(255,255,255,0.92);}
+
+.title-input{background:transparent;border:1px solid rgba(255,255,255,0.10);border-radius:12px;padding:6px 10px;font-weight:900;color:rgba(255,255,255,0.92);max-width:240px}
+.title-input:focus{outline:none;border-color:rgba(167,139,250,0.55);box-shadow:0 0 0 3px rgba(167,139,250,0.12)}

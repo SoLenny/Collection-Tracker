@@ -1,3 +1,4 @@
+const VERSION = "v4.1.1";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -158,12 +159,13 @@ let state = {
   cards: [],
 
   statusFilter: "all",
-  partFilter: "all",
 
   image: null,
   imageURL: null,
   imageScale: 1,
   highlightCardId: null,
+  focusCardId: null,
+  focusUntil: 0,
 
   drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
   imageByPart: new Map(),
@@ -279,15 +281,51 @@ function renderSeriesList(){
     const item = document.createElement("div");
     item.className = "series-item" + (s.id===active ? " active" : "");
     item.dataset.id = s.id;
-    item.innerHTML = `
-      <div class="thumb"><div style="font-weight:900;color:rgba(255,255,255,0.65)">✦</div></div>
-      <div class="series-info">
-        <div class="series-name-row">${escapeHtml(seriesDisplayName(s.name))}</div>
-        <div class="series-sub"><span class="badge">обновлено</span></div>
-      </div>
-    `;
+
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    thumb.innerHTML = `<div style="font-weight:900;color:rgba(255,255,255,0.65)">✦</div>`;
+
+    const info = document.createElement("div");
+    info.className = "series-info";
+    const nameRow = document.createElement("div");
+    nameRow.className = "series-name-row";
+    nameRow.textContent = seriesDisplayName(s.name);
+
+    const sub = document.createElement("div");
+    sub.className = "series-sub";
+    const badge = document.createElement("span");
+    badge.className = "badge progress-badge dim";
+    badge.textContent = "0/0";
+    sub.appendChild(badge);
+
+    info.append(nameRow, sub);
+    item.append(thumb, info);
+
+    // Open
     item.addEventListener("click", () => openSeries(s.id));
     els.seriesList.appendChild(item);
+
+    // Async: thumbnail
+    (async () => {
+      const blob = await seriesPreviewBlob(s.id);
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.src = url;
+      img.onload = () => URL.revokeObjectURL(url);
+      thumb.innerHTML = "";
+      thumb.appendChild(img);
+    })();
+
+    // Async: progress text (received/total)
+    (async () => {
+      const cards = await db.getAllByIndex("cards","seriesId", s.id);
+      const total = cards.length;
+      const received = cards.reduce((acc,c)=>acc + (c.received ? 1 : 0), 0);
+      badge.textContent = `${received}/${total}`;
+      badge.classList.toggle("dim", total === 0);
+    })();
   }
 }
 
@@ -369,7 +407,6 @@ async function openSeries(seriesId){
   state.cards = (await db.getAllByIndex("cards","seriesId", seriesId)).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
 
   state.statusFilter = "all";
-  state.partFilter = "all";
   $$(".chip").forEach(ch => ch.classList.toggle("active", ch.dataset.filter==="all"));
 
   els.seriesName.value = s.name || "";
@@ -411,18 +448,24 @@ function renderPartSelect(){
   els.partSelect.value = state.activePartId || state.parts[0].id;
 }
 function renderPartFilter(){
+  // This select mirrors the active part (no filtering). It allows switching canvas image.
   els.partFilter.innerHTML = "";
-  const all = document.createElement("option");
-  all.value = "all";
-  all.textContent = "Все части";
-  els.partFilter.appendChild(all);
+  if (!state.parts.length){
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "—";
+    els.partFilter.appendChild(o);
+    els.partFilter.disabled = true;
+    return;
+  }
+  els.partFilter.disabled = false;
   for (const p of state.parts){
     const o = document.createElement("option");
     o.value = p.id;
     o.textContent = `Часть ${p.index}`;
     els.partFilter.appendChild(o);
   }
-  els.partFilter.value = state.partFilter;
+  els.partFilter.value = state.activePartId || state.parts[0].id;
 }
 
 async function loadActivePartImage(){
@@ -482,7 +525,7 @@ async function addPartFromFile(file){
 /* ---------- Stats + list ---------- */
 function renderStats(){
   const { total, trade, received, pending } = humanStats(state.cards);
-  els.seriesStats.textContent = total ? `Всего: ${total} • Нашла обмен: ${trade} • Получено: ${received} • Жду: ${pending}` : `Пока нет выделенных открыток`;
+  els.seriesStats.textContent = total ? `Всего: ${total} • Обмен найден: ${trade} • Получено: ${received} • Жду: ${pending}` : `Пока нет выделенных открыток`;
 }
 
 function filterCards(cards){
@@ -490,7 +533,6 @@ function filterCards(cards){
   if (state.statusFilter === "trade") out = out.filter(c=>c.foundTrade);
   else if (state.statusFilter === "received") out = out.filter(c=>c.received);
   else if (state.statusFilter === "pending") out = out.filter(c=>!c.received);
-  if (state.partFilter !== "all") out = out.filter(c=>c.partId === state.partFilter);
   return out;
 }
 
@@ -518,10 +560,20 @@ function miniPreviewDataURL(card){
     </svg>`);
   }
   const oc = document.createElement("canvas");
-  const ow=320, oh=240;
-  oc.width=ow; oc.height=oh;
+  // Keep aspect ratio to avoid squished previews
+  const maxW = 320, maxH = 240;
+  const ratio = Math.max(1, card.w) / Math.max(1, card.h);
+  let ow = maxW;
+  let oh = Math.round(ow / ratio);
+  if (oh > maxH){
+    oh = maxH;
+    ow = Math.round(oh * ratio);
+  }
+  oc.width = ow;
+  oc.height = oh;
   const cctx = oc.getContext("2d");
   cctx.imageSmoothingEnabled = true;
+  cctx.clearRect(0,0,ow,oh);
   cctx.drawImage(img, Math.max(0,card.x), Math.max(0,card.y), Math.max(1,card.w), Math.max(1,card.h), 0,0,ow,oh);
   return oc.toDataURL("image/jpeg", 0.78);
 }
@@ -559,9 +611,21 @@ async function renderCardsList(){
 
     const row1 = document.createElement("div");
     row1.className = "row1";
-    const label = document.createElement("div");
-    label.className = "label";
-    label.textContent = cardLabel(idx);
+    const label = document.createElement("input");
+    label.className = "label title-input";
+    label.type = "text";
+    label.value = (c.title || "").trim() || cardLabel(idx);
+    label.placeholder = cardLabel(idx);
+    let titleTmr = null;
+    label.addEventListener("input", () => {
+      if (titleTmr) clearTimeout(titleTmr);
+      titleTmr = setTimeout(async () => {
+        c.title = label.value.trim();
+        c.updatedAt = Date.now();
+        await db.put("cards", c);
+        await touchSeriesUpdated();
+      }, 250);
+    });
     const parttag = document.createElement("div");
     parttag.className = "parttag";
     const part = state.parts.find(p=>p.id===c.partId);
@@ -583,7 +647,7 @@ async function renderCardsList(){
       await touchSeriesUpdated();
       refreshStatsAndRender();
     });
-    t1.append(cb1, Object.assign(document.createElement("span"), {textContent:"Нашла обмен"}));
+    t1.append(cb1, Object.assign(document.createElement("span"), {textContent:"Обмен найден"}));
 
     const t2 = document.createElement("label");
     t2.className = "toggle";
@@ -662,6 +726,8 @@ async function showCardOnCanvas(card){
   }
   els.canvas.scrollIntoView({behavior:"smooth", block:"center"});
   state.highlightCardId = card.id;
+  state.focusCardId = card.id;
+  state.focusUntil = Date.now() + 1400;
   draw();
   setTimeout(()=>{ state.highlightCardId = null; draw(); }, 1200);
 }
@@ -918,6 +984,7 @@ function draw(){
   ctx.restore();
 
   const partCards = state.cards.filter(c=>c.partId===state.activePartId);
+  const focusActive = state.focusCardId && state.focusUntil && (Date.now() < state.focusUntil);
   for (const c of partCards){
     const {cx:x1, cy:y1} = imageToCanvasCoords(c.x, c.y);
     const {cx:x2, cy:y2} = imageToCanvasCoords(c.x+c.w, c.y+c.h);
@@ -928,13 +995,18 @@ function draw(){
     const isTrade = !!c.foundTrade;
 
     ctx.save();
+    if (focusActive && c.id !== state.focusCardId){
+      ctx.globalAlpha = 0.18;
+    }
     ctx.lineWidth = devicePx(isHi ? 2.6 : 1.6);
+
     ctx.strokeStyle = isReceived ? "rgba(34,197,94,0.95)"
                   : isTrade ? "rgba(245,158,11,0.95)"
                   : "rgba(167,139,250,0.95)";
     ctx.fillStyle = isReceived ? "rgba(34,197,94,0.12)"
                  : isTrade ? "rgba(245,158,11,0.10)"
                  : "rgba(167,139,250,0.10)";
+    ctx.beginPath();
     ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
     ctx.fill();
     ctx.stroke();
@@ -948,6 +1020,7 @@ function draw(){
     ctx.strokeStyle = "rgba(255,255,255,0.95)";
     ctx.setLineDash([devicePx(8), devicePx(6)]);
     ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath();
     ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
     ctx.fill();
     ctx.stroke();
@@ -995,6 +1068,7 @@ async function onPointerUp(){
     h: Math.round(ir.h),
     foundTrade: false,
     received: false,
+    title: "",
     note: "",
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -1063,14 +1137,21 @@ function initEvents(){
     if (!id || id === state.activePartId) return;
     state.activePartId = id;
     localStorage.setItem("ct_last_part_"+state.activeSeriesId, id);
+    renderPartFilter();
     await loadActivePartImage();
     resizeCanvasAndRedraw();
     draw();
   });
 
   els.partFilter.addEventListener("change", async () => {
-    state.partFilter = els.partFilter.value;
-    await renderCardsList();
+    const id = els.partFilter.value;
+    if (!id || id === state.activePartId) return;
+    state.activePartId = id;
+    localStorage.setItem("ct_last_part_"+state.activeSeriesId, id);
+    renderPartSelect();
+    await loadActivePartImage();
+    resizeCanvasAndRedraw();
+    draw();
   });
 
   $$(".chip").forEach(ch => {
@@ -1126,5 +1207,6 @@ function registerSW(){
 }
 
 initEvents();
+const _vb = document.getElementById("versionBadge"); if (_vb) _vb.textContent = VERSION;
 registerSW();
 loadAll();
