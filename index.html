@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Collection Tracker</title>
+  <meta name="theme-color" content="#7c3aed" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">✦</div>
+      <div>
+        <div class="title">Collection Tracker</div>
+        <div class="subtitle">Открытки • обмены • получение</div>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <button id="btnExport" class="btn ghost" title="Экспорт данных в JSON">Экспорт</button>
+      <label class="btn ghost file">
+        Импорт
+        <input id="fileImport" type="file" accept="application/json" />
+      </label>
+      <button id="btnAbout" class="btn ghost" title="Справка">?</button>
+    </div>
+  </header>
+
+  <main class="app">
+    <aside class="sidebar">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title">Серии</div>
+          <button id="btnNewSeries" class="btn primary">＋ Добавить</button>
+        </div>
+
+        <div id="seriesList" class="series-list" role="list"></div>
+
+        <div class="hint">
+          <div class="hint-title">Как пользоваться</div>
+          <ol>
+            <li>Создай серию → загрузи картинку.</li>
+            <li>Выделяй открытки рамкой (мышкой или пальцем).</li>
+            <li>Ставь галочки “Нашла обмен” и “Получено”.</li>
+          </ol>
+          <div class="hint-small">Данные хранятся на устройстве (IndexedDB). Для синхронизации позже добавим аккаунт/облако.</div>
+        </div>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <div id="emptyState" class="empty">
+        <div class="empty-card">
+          <div class="empty-title">Добавь первую серию</div>
+          <div class="empty-text">Это локальное веб‑приложение. Откроется и на телефоне через GitHub Pages. Без авторизации — пока 🙂</div>
+          <button id="btnNewSeries2" class="btn primary">＋ Добавить серию</button>
+        </div>
+      </div>
+
+      <div id="seriesView" class="series-view hidden">
+        <div class="series-toolbar">
+          <div class="series-meta">
+            <input id="seriesName" class="series-name" type="text" placeholder="Название серии" />
+            <div class="series-stats" id="seriesStats">—</div>
+          </div>
+
+          <div class="series-actions">
+            <label class="btn">
+              Загрузить изображение
+              <input id="fileImage" type="file" accept="image/*" />
+            </label>
+            <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение">↶ Отменить</button>
+            <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
+          </div>
+        </div>
+
+        <div class="board">
+          <div class="canvas-wrap">
+            <canvas id="canvas" width="1200" height="800"></canvas>
+            <div class="canvas-help" id="canvasHelp">
+              <div><b>Выделение:</b> потяни рамку по открытке (мышкой или пальцем).</div>
+              <div><b>Редактирование:</b> пока только удалить/переделать (выдели заново).</div>
+            </div>
+          </div>
+
+          <div class="cards">
+            <div class="cards-head">
+              <div class="cards-title">Открытки</div>
+              <div class="chips">
+                <button class="chip active" data-filter="all">Все</button>
+                <button class="chip" data-filter="trade">Нашла обмен</button>
+                <button class="chip" data-filter="received">Получено</button>
+                <button class="chip" data-filter="pending">Жду</button>
+              </div>
+            </div>
+            <div id="cardsList" class="cards-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="dlgNewSeries" class="dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-title">Новая серия</div>
+      <label class="field">
+        <span>Название</span>
+        <input id="newSeriesName" type="text" placeholder="Например: Winx Set 1" required />
+      </label>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel">Отмена</button>
+        <button id="btnCreateSeries" class="btn primary" value="ok">Создать</button>
+      </div>
+      <div class="dialog-small">Картинку можно загрузить сразу после создания.</div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgAbout" class="dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-title">Справка</div>
+      <div class="dialog-text">
+        <p><b>Добавление открыток:</b> потяни рамку на картинке серии — появится карточка справа.</p>
+        <p><b>Данные:</b> сохраняются на этом устройстве в IndexedDB.</p>
+        <p><b>Экспорт/импорт:</b> используй кнопки вверху, чтобы делать резервные копии или переносить данные.</p>
+        <p><b>Планы:</b> позже можно добавить авторизацию/синхронизацию и “умное” авто‑распознавание.</p>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn primary" value="ok">Ок</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
