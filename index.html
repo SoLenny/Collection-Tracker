@@ -69,21 +69,16 @@
 
       <div id="seriesView" class="series-view hidden">
         <div class="series-toolbar">
-          <div class="series-group series-group--left">
+          <div class="series-toolbar-left">
             <input id="seriesName" class="series-name" type="text" placeholder="Название серии" />
-          </div>
-
-          <div class="series-group series-group--center">
             <div class="series-stats" id="seriesStats">—</div>
+            <div class="part-picker">
+              <select id="partSelect" class="select"></select>
+            </div>
           </div>
 
-          <div class="series-group series-group--right">
+          <div class="series-toolbar-right">
             <div class="series-actions">
-              <div class="part-picker">
-                <span class="part-label">Часть</span>
-                <select id="partSelect" class="select"></select>
-              </div>
-
               <label class="btn">
                 ＋ Добавить изображение
                 <input id="fileImage" type="file" accept="image/*" multiple />
@@ -124,9 +119,15 @@
                   <button class="chip" data-filter="pending">Жду</button>
                 </div>
 
-                <div class="part-filter">
-                  <span class="part-label">Фильтр: Часть</span>
-                  <select id="partFilter" class="select"></select>
+                <div class="cards-controls-right">
+                  <div class="part-filter">
+                    <span class="part-filter-label">Фильтр: Часть</span>
+                    <select id="partFilter" class="select"></select>
+                  </div>
+                  <div class="toggle-all">
+                    <button id="toggleAllTrade" class="btn ghost tiny" type="button">Toggle all: Обмен найден</button>
+                    <button id="toggleAllReceived" class="btn ghost tiny" type="button">Toggle all: Получено</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -179,6 +180,6 @@
   </dialog>
 
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v4.1.2</div>
+  <div class="version-badge" id="versionBadge">v4.1.3</div>
 </body>
 </html>
