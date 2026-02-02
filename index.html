@@ -74,7 +74,6 @@
               <option value="created">Дата создания</option>
               <option value="completion">Завершенность</option>
               <option value="title">Название</option>
-              <option value="size">Размер</option>
             </select>
             <button id="homeSortDir" class="btn ghost tiny" type="button" aria-label="Сортировка по убыванию">↓</button>
           </div>
@@ -225,7 +224,24 @@
     </form>
   </dialog>
 
+  <dialog id="dlgCoverPos" class="dialog">
+    <form method="dialog" class="dialog-card dialog-cover">
+      <div class="dialog-title">Позиция обложки</div>
+      <div class="thumb-editor">
+        <div class="cover-frame" id="coverFrame">
+          <img id="coverImage" alt="" draggable="false" />
+        </div>
+        <div class="thumb-hint">Перетаскивай изображение, чтобы выбрать область обложки.</div>
+      </div>
+      <div class="dialog-actions">
+        <button id="coverReset" class="btn ghost" type="button">Сбросить</button>
+        <button class="btn ghost" value="cancel" formnovalidate>Отмена</button>
+        <button id="coverSave" class="btn primary" value="ok">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v4.1.4</div>
+  <div class="version-badge" id="versionBadge">v4.1.5</div>
 </body>
 </html>
