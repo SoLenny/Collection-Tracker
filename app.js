@@ -1,4 +1,4 @@
-const VERSION = "v4.1.6";
+const VERSION = "v4.1.7";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -920,6 +920,9 @@ async function addPartFromFile(file){
   state.activePartId = part.id;
   localStorage.setItem("ct_last_part_"+state.activeSeriesId, state.activePartId);
 
+  updatePartsUIVisibility();
+  updateDropzoneVisibility();
+
   const series = state.series.find(s => s.id === state.activeSeriesId);
   if (series && !series.coverPartId){
     series.coverPartId = part.id;
@@ -1592,12 +1595,7 @@ function resizeCanvasAndRedraw(){
   const parent = canvas.parentElement;
   if (!parent) return;
   const cssW = parent.clientWidth;
-
-  let cssH = Math.min(Math.max(420, window.innerHeight - 260), 700);
-  if (state.image){
-    const ar = state.image.height / state.image.width;
-    cssH = clamp(cssW * ar, 320, Math.max(380, window.innerHeight - 260));
-  }
+  const cssH = Math.min(Math.max(420, window.innerHeight - 260), 700);
 
   canvas.style.width = cssW + "px";
   canvas.style.height = cssH + "px";
