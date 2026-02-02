@@ -1,4 +1,4 @@
-const VERSION = "v4.2.1";
+const VERSION = "v4.2.2";
 // Collection Tracker v4.2
 // - Series page: multiple images per collection (flat)
 // - All images visible on the collection screen
@@ -287,6 +287,41 @@ function getCropMetrics(imgW, imgH, frameW, frameH, zoom){
   return { scaledW, scaledH, overflowX, overflowY };
 }
 
+function getCropFrameMetrics(editState, frameEl, imgEl){
+  const rect = frameEl.getBoundingClientRect();
+  const frameW = rect.width || 1;
+  const frameH = rect.height || 1;
+  const imgW = editState?.imgW || imgEl?.naturalWidth || imgEl?.width || 1;
+  const imgH = editState?.imgH || imgEl?.naturalHeight || imgEl?.height || 1;
+  const zoom = clampZoom(editState?.zoom || 1);
+  const { scaledW, scaledH, overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, zoom);
+  const minTx = Math.min(0, frameW - scaledW);
+  const minTy = Math.min(0, frameH - scaledH);
+  return {
+    frameW,
+    frameH,
+    imgW,
+    imgH,
+    zoom,
+    scaledW,
+    scaledH,
+    overflowX,
+    overflowY,
+    minTx,
+    maxTx: 0,
+    minTy,
+    maxTy: 0,
+  };
+}
+
+function applyCropTransform(imgEl, metrics, tx, ty){
+  if (!imgEl || !metrics) return;
+  imgEl.style.width = `${metrics.imgW}px`;
+  imgEl.style.height = `${metrics.imgH}px`;
+  imgEl.style.transform = `translate(${tx}px, ${ty}px) scale(${metrics.scaledW / metrics.imgW})`;
+  imgEl.style.transformOrigin = "top left";
+}
+
 function clampCropPosition(pos, overflowX, overflowY){
   return {
     x: overflowX ? clamp(Number(pos?.x) || 50, 0, 100) : 50,
@@ -296,20 +331,14 @@ function clampCropPosition(pos, overflowX, overflowY){
 
 function applyCropToImage(editState, frameEl, imgEl){
   if (!editState || !frameEl || !imgEl) return;
-  const rect = frameEl.getBoundingClientRect();
-  const frameW = rect.width || 1;
-  const frameH = rect.height || 1;
-  const imgW = editState.imgW || imgEl.naturalWidth || imgEl.width || 1;
-  const imgH = editState.imgH || imgEl.naturalHeight || imgEl.height || 1;
-  editState.zoom = clampZoom(editState.zoom || 1);
-  const { overflowX, overflowY, scaledW, scaledH } = getCropMetrics(imgW, imgH, frameW, frameH, editState.zoom);
-  editState.pos = clampCropPosition(editState.pos || {x:50, y:50}, overflowX, overflowY);
-  const offsetX = overflowX ? (editState.pos.x / 100) * overflowX : 0;
-  const offsetY = overflowY ? (editState.pos.y / 100) * overflowY : 0;
-  imgEl.style.width = `${imgW}px`;
-  imgEl.style.height = `${imgH}px`;
-  imgEl.style.transform = `translate(${-offsetX}px, ${-offsetY}px) scale(${scaledW / imgW})`;
-  imgEl.style.transformOrigin = "top left";
+  const metrics = getCropFrameMetrics(editState, frameEl, imgEl);
+  editState.zoom = metrics.zoom;
+  editState.pos = clampCropPosition(editState.pos || {x:50, y:50}, metrics.overflowX, metrics.overflowY);
+  const offsetX = metrics.overflowX ? (editState.pos.x / 100) * metrics.overflowX : 0;
+  const offsetY = metrics.overflowY ? (editState.pos.y / 100) * metrics.overflowY : 0;
+  editState.tx = -offsetX;
+  editState.ty = -offsetY;
+  applyCropTransform(imgEl, metrics, editState.tx, editState.ty);
 }
 
 function applyCropPreview(imgEl, frameEl, pos, zoom){
@@ -325,14 +354,17 @@ function applyCropPreview(imgEl, frameEl, pos, zoom){
     const imgW = imgEl.naturalWidth || imgEl.width || 1;
     const imgH = imgEl.naturalHeight || imgEl.height || 1;
     const safeZoom = clampZoom(zoom || 1);
-    const { overflowX, overflowY, scaledW } = getCropMetrics(imgW, imgH, frameW, frameH, safeZoom);
+    const { overflowX, overflowY, scaledW, scaledH } = getCropMetrics(imgW, imgH, frameW, frameH, safeZoom);
     const nextPos = clampCropPosition(pos || {x:50, y:50}, overflowX, overflowY);
     const offsetX = overflowX ? (nextPos.x / 100) * overflowX : 0;
     const offsetY = overflowY ? (nextPos.y / 100) * overflowY : 0;
-    imgEl.style.width = `${imgW}px`;
-    imgEl.style.height = `${imgH}px`;
-    imgEl.style.transform = `translate(${-offsetX}px, ${-offsetY}px) scale(${scaledW / imgW})`;
-    imgEl.style.transformOrigin = "top left";
+    const metrics = {
+      imgW,
+      imgH,
+      scaledW,
+      scaledH,
+    };
+    applyCropTransform(imgEl, metrics, -offsetX, -offsetY);
   };
   if (imgEl.complete) {
     apply();
@@ -2099,33 +2131,38 @@ async function openCoverEditor(seriesId){
   });
 }
 
-function updateCropPositionFromDrag(editState, frameEl, imgEl, deltaX, deltaY){
+function updateCropPositionFromDrag(editState, imgEl, currentX, currentY){
   if (!editState) return;
   const drag = editState.drag;
   if (!drag) return;
-  const nextOffsetX = clamp(drag.startOffsetX - deltaX, 0, drag.overflowX);
-  const nextOffsetY = clamp(drag.startOffsetY - deltaY, 0, drag.overflowY);
-  editState.pos.x = drag.overflowX ? (nextOffsetX / drag.overflowX) * 100 : 50;
-  editState.pos.y = drag.overflowY ? (nextOffsetY / drag.overflowY) * 100 : 50;
-  applyCropToImage(editState, frameEl, imgEl);
+  const deltaX = currentX - drag.startX;
+  const deltaY = currentY - drag.startY;
+  const nextTx = clamp(drag.startTx + deltaX, drag.minTx, drag.maxTx);
+  const nextTy = clamp(drag.startTy + deltaY, drag.minTy, drag.maxTy);
+  editState.tx = nextTx;
+  editState.ty = nextTy;
+  editState.pos.x = drag.overflowX ? (-nextTx / drag.overflowX) * 100 : 50;
+  editState.pos.y = drag.overflowY ? (-nextTy / drag.overflowY) * 100 : 50;
+  applyCropTransform(imgEl, drag, nextTx, nextTy);
 }
 
-function startCropDrag(editState, frameEl, startX, startY){
-  if (!editState || !frameEl) return;
-  const frameRect = frameEl.getBoundingClientRect();
-  const frameW = frameRect.width || 1;
-  const frameH = frameRect.height || 1;
-  const { imgW, imgH } = editState;
-  const zoom = clampZoom(editState.zoom || 1);
-  const { overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, zoom);
-  editState.pos = clampCropPosition(editState.pos || {x:50, y:50}, overflowX, overflowY);
+function startCropDrag(editState, frameEl, imgEl, startX, startY){
+  if (!editState || !frameEl || !imgEl) return;
+  const metrics = getCropFrameMetrics(editState, frameEl, imgEl);
+  editState.zoom = metrics.zoom;
+  editState.pos = clampCropPosition(editState.pos || {x:50, y:50}, metrics.overflowX, metrics.overflowY);
+  const offsetX = metrics.overflowX ? (editState.pos.x / 100) * metrics.overflowX : 0;
+  const offsetY = metrics.overflowY ? (editState.pos.y / 100) * metrics.overflowY : 0;
+  const startTx = -offsetX;
+  const startTy = -offsetY;
+  editState.tx = startTx;
+  editState.ty = startTy;
   editState.drag = {
     startX,
     startY,
-    overflowX,
-    overflowY,
-    startOffsetX: overflowX ? (editState.pos.x / 100) * overflowX : 0,
-    startOffsetY: overflowY ? (editState.pos.y / 100) * overflowY : 0,
+    startTx,
+    startTy,
+    ...metrics,
   };
 }
 
@@ -2231,12 +2268,12 @@ function initEvents(){
     state.thumbEdit.isDragging = true;
     state.thumbEdit.startX = evt.clientX;
     state.thumbEdit.startY = evt.clientY;
-    startCropDrag(state.thumbEdit, els.thumbFrame, evt.clientX, evt.clientY);
+    startCropDrag(state.thumbEdit, els.thumbFrame, els.thumbImage, evt.clientX, evt.clientY);
     els.thumbFrame.setPointerCapture(evt.pointerId);
   });
   els.thumbFrame.addEventListener("pointermove", (evt) => {
     if (!state.thumbEdit?.isDragging) return;
-    updateCropPositionFromDrag(state.thumbEdit, els.thumbFrame, els.thumbImage, evt.clientX - state.thumbEdit.startX, evt.clientY - state.thumbEdit.startY);
+    updateCropPositionFromDrag(state.thumbEdit, els.thumbImage, evt.clientX, evt.clientY);
   });
   els.thumbFrame.addEventListener("wheel", (evt) => {
     if (!state.thumbEdit) return;
@@ -2289,12 +2326,12 @@ function initEvents(){
     state.coverEdit.isDragging = true;
     state.coverEdit.startX = evt.clientX;
     state.coverEdit.startY = evt.clientY;
-    startCropDrag(state.coverEdit, els.coverFrame, evt.clientX, evt.clientY);
+    startCropDrag(state.coverEdit, els.coverFrame, els.coverImage, evt.clientX, evt.clientY);
     els.coverFrame.setPointerCapture(evt.pointerId);
   });
   els.coverFrame.addEventListener("pointermove", (evt) => {
     if (!state.coverEdit?.isDragging) return;
-    updateCropPositionFromDrag(state.coverEdit, els.coverFrame, els.coverImage, evt.clientX - state.coverEdit.startX, evt.clientY - state.coverEdit.startY);
+    updateCropPositionFromDrag(state.coverEdit, els.coverImage, evt.clientX, evt.clientY);
   });
   els.coverFrame.addEventListener("wheel", (evt) => {
     if (!state.coverEdit) return;
