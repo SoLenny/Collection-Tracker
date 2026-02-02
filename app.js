@@ -1,4 +1,4 @@
-const VERSION = "v4.2.0";
+const VERSION = "v4.2.1";
 // Collection Tracker v4.2
 // - Series page: multiple images per collection (flat)
 // - All images visible on the collection screen
@@ -230,6 +230,10 @@ function bestOverlap(r, cards){
   return best;
 }
 function seriesDisplayName(name){ return (name && name.trim()) ? name.trim() : "Без названия"; }
+function imageDisplayTitle(image, idx){
+  const raw = (image?.title || "").trim();
+  return raw ? raw : `Изображение ${idx}`;
+}
 function limitText(value, max){
   if (typeof value !== "string") return "";
   return value.length > max ? value.slice(0, max) : value;
@@ -298,14 +302,14 @@ function applyCropToImage(editState, frameEl, imgEl){
   const imgW = editState.imgW || imgEl.naturalWidth || imgEl.width || 1;
   const imgH = editState.imgH || imgEl.naturalHeight || imgEl.height || 1;
   editState.zoom = clampZoom(editState.zoom || 1);
-  const { scaledW, scaledH, overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, editState.zoom);
+  const { overflowX, overflowY, scaledW, scaledH } = getCropMetrics(imgW, imgH, frameW, frameH, editState.zoom);
   editState.pos = clampCropPosition(editState.pos || {x:50, y:50}, overflowX, overflowY);
   const offsetX = overflowX ? (editState.pos.x / 100) * overflowX : 0;
   const offsetY = overflowY ? (editState.pos.y / 100) * overflowY : 0;
-  imgEl.style.width = `${scaledW}px`;
-  imgEl.style.height = `${scaledH}px`;
-  imgEl.style.left = `${-offsetX}px`;
-  imgEl.style.top = `${-offsetY}px`;
+  imgEl.style.width = `${imgW}px`;
+  imgEl.style.height = `${imgH}px`;
+  imgEl.style.transform = `translate(${-offsetX}px, ${-offsetY}px) scale(${scaledW / imgW})`;
+  imgEl.style.transformOrigin = "top left";
 }
 
 function applyCropPreview(imgEl, frameEl, pos, zoom){
@@ -321,14 +325,14 @@ function applyCropPreview(imgEl, frameEl, pos, zoom){
     const imgW = imgEl.naturalWidth || imgEl.width || 1;
     const imgH = imgEl.naturalHeight || imgEl.height || 1;
     const safeZoom = clampZoom(zoom || 1);
-    const { scaledW, scaledH, overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, safeZoom);
+    const { overflowX, overflowY, scaledW } = getCropMetrics(imgW, imgH, frameW, frameH, safeZoom);
     const nextPos = clampCropPosition(pos || {x:50, y:50}, overflowX, overflowY);
     const offsetX = overflowX ? (nextPos.x / 100) * overflowX : 0;
     const offsetY = overflowY ? (nextPos.y / 100) * overflowY : 0;
-    imgEl.style.width = `${scaledW}px`;
-    imgEl.style.height = `${scaledH}px`;
-    imgEl.style.left = `${-offsetX}px`;
-    imgEl.style.top = `${-offsetY}px`;
+    imgEl.style.width = `${imgW}px`;
+    imgEl.style.height = `${imgH}px`;
+    imgEl.style.transform = `translate(${-offsetX}px, ${-offsetY}px) scale(${scaledW / imgW})`;
+    imgEl.style.transformOrigin = "top left";
   };
   if (imgEl.complete) {
     apply();
@@ -691,7 +695,8 @@ async function renderHome(){
     const btnRefresh = document.createElement("button");
     btnRefresh.type = "button";
     btnRefresh.className = "thumb-action";
-    btnRefresh.setAttribute("aria-label", "Обновить обложку");
+    btnRefresh.setAttribute("aria-label", "Сбросить обложку на первое изображение");
+    btnRefresh.title = "Сбросить обложку на первое изображение";
     btnRefresh.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none">
       <path d="M4 12a8 8 0 0 1 14-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       <path d="M18 5v4h-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -843,9 +848,57 @@ async function createImageBlock(image, idx){
 
   const head = document.createElement("div");
   head.className = "image-block-head";
-  const title = document.createElement("div");
-  title.className = "image-title";
-  title.textContent = `Изображение ${idx}`;
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "image-title-wrap";
+  const titleText = document.createElement("span");
+  titleText.className = "image-title-text";
+  titleText.textContent = imageDisplayTitle(image, idx);
+  const titleInput = document.createElement("input");
+  titleInput.className = "image-title-input";
+  titleInput.type = "text";
+  titleInput.maxLength = 60;
+  titleInput.value = (image.title || "").trim();
+  titleInput.placeholder = `Изображение ${idx}`;
+
+  const titleEdit = document.createElement("button");
+  titleEdit.type = "button";
+  titleEdit.className = "image-title-edit";
+  titleEdit.title = "Редактировать название изображения";
+  titleEdit.setAttribute("aria-label", "Редактировать название изображения");
+  titleEdit.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+    <path d="M4 20h4l10-10-4-4L4 16v4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M13 5l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </svg>`;
+
+  const commitTitle = async () => {
+    if (!titleWrap.classList.contains("editing")) return;
+    titleWrap.classList.remove("editing");
+    const nextTitle = limitText(titleInput.value, 60).trim();
+    image.title = nextTitle;
+    image.updatedAt = Date.now();
+    await db.put("images", image);
+    titleText.textContent = imageDisplayTitle(image, idx);
+  };
+
+  titleEdit.addEventListener("click", (evt) => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    titleWrap.classList.add("editing");
+    titleInput.value = (image.title || "").trim();
+    titleInput.focus();
+    titleInput.select();
+  });
+  titleInput.addEventListener("keydown", (evt) => {
+    if (evt.key === "Enter"){
+      evt.preventDefault();
+      titleInput.blur();
+    }
+  });
+  titleInput.addEventListener("blur", () => {
+    commitTitle();
+  });
+
+  titleWrap.append(titleText, titleInput, titleEdit);
 
   const openBtn = document.createElement("button");
   openBtn.type = "button";
@@ -861,7 +914,7 @@ async function createImageBlock(image, idx){
     openImageViewer(image.id);
   });
 
-  head.append(title, openBtn);
+  head.append(titleWrap, openBtn);
 
   const wrap = document.createElement("div");
   wrap.className = "image-canvas-wrap";
@@ -1167,6 +1220,7 @@ async function addImageFromFile(file){
     id: uid("image"),
     seriesId: state.activeSeriesId,
     index: nextIdx,
+    title: "",
     imageBlob: file,
     imageW: w,
     imageH: h,
@@ -1216,12 +1270,6 @@ function setupImageViewer(){
         <canvas class="viewer-canvas" width="1200" height="800"></canvas>
       </div>
       <div class="viewer-controls">
-        <div class="zoom-controls">
-          <button class="zoom-btn" type="button" data-zoom="-0.1" aria-label="Уменьшить">−</button>
-          <input class="zoom-slider" type="range" min="1" max="3" step="0.01" value="1" />
-          <button class="zoom-btn" type="button" data-zoom="0.1" aria-label="Увеличить">＋</button>
-          <span class="zoom-value">100%</span>
-        </div>
         <div class="viewer-hint">Можно выделять новые открытки прямо здесь.</div>
       </div>
     </div>
@@ -1234,24 +1282,6 @@ function setupImageViewer(){
   closeBtn.addEventListener("click", () => dialog.close());
   const canvas = dialog.querySelector(".viewer-canvas");
   const ctx = canvas.getContext("2d");
-  const slider = dialog.querySelector(".zoom-slider");
-  const zoomValue = dialog.querySelector(".zoom-value");
-  const zoomButtons = dialog.querySelectorAll(".zoom-btn");
-
-  slider.addEventListener("input", () => {
-    state.viewerZoom = clampZoom(slider.value);
-    zoomValue.textContent = `${Math.round(state.viewerZoom * 100)}%`;
-    drawViewer();
-  });
-  zoomButtons.forEach(btn => {
-    btn.addEventListener("click", () => {
-      const delta = Number(btn.dataset.zoom || 0);
-      state.viewerZoom = clampZoom((state.viewerZoom || 1) + delta);
-      slider.value = String(state.viewerZoom);
-      zoomValue.textContent = `${Math.round(state.viewerZoom * 100)}%`;
-      drawViewer();
-    });
-  });
 
   canvas.addEventListener("pointerdown", onViewerPointerDown);
   canvas.addEventListener("pointermove", onViewerPointerMove);
@@ -1277,12 +1307,6 @@ function openImageViewer(imageId){
   state.viewerImageId = imageId;
   state.viewerImage = block.imageEl;
   state.viewerZoom = 1;
-  const slider = state.imageViewer.querySelector(".zoom-slider");
-  const zoomValue = state.imageViewer.querySelector(".zoom-value");
-  if (slider){
-    slider.value = "1";
-  }
-  if (zoomValue) zoomValue.textContent = "100%";
   state.imageViewer.showModal();
   requestAnimationFrame(() => {
     resizeViewerCanvas();
@@ -1329,8 +1353,6 @@ function drawViewer(){
 
   const r = viewerImageDrawRect();
   ctx.save();
-  ctx.fillStyle = "rgba(18,18,28,0.92)";
-  ctx.fillRect(0,0,state.viewerCanvas.width, state.viewerCanvas.height);
   ctx.globalAlpha = 1;
   ctx.drawImage(state.viewerImage, r.dx, r.dy, r.dw, r.dh);
   ctx.restore();
@@ -1747,10 +1769,15 @@ function applyReceived(card, value){
 function highlightCardInList(cardId){
   const cardEl = els.cardsList.querySelector(`[data-card-id="${cardId}"]`);
   if (!cardEl) return;
+  const prevX = window.scrollX;
+  const prevY = window.scrollY;
+  cardEl.scrollIntoView({block:"nearest", inline:"nearest"});
+  if (window.scrollX !== prevX || window.scrollY !== prevY){
+    window.scrollTo(prevX, prevY);
+  }
   cardEl.classList.remove("pulse-highlight");
   void cardEl.offsetWidth;
   cardEl.classList.add("pulse-highlight");
-  cardEl.scrollIntoView({behavior:"smooth", block:"center"});
   setTimeout(() => cardEl.classList.remove("pulse-highlight"), 1500);
 }
 
@@ -2020,7 +2047,7 @@ async function openThumbEditor(card){
     isDragging: false,
     startX: 0,
     startY: 0,
-    startPos: {...pos},
+    drag: null,
   };
   els.thumbImage.src = img.src;
   els.dlgThumbPos.showModal();
@@ -2061,7 +2088,7 @@ async function openCoverEditor(seriesId){
     isDragging: false,
     startX: 0,
     startY: 0,
-    startPos: {...pos},
+    drag: null,
     imageUrl,
   };
   els.coverImage.src = imageUrl;
@@ -2074,20 +2101,32 @@ async function openCoverEditor(seriesId){
 
 function updateCropPositionFromDrag(editState, frameEl, imgEl, deltaX, deltaY){
   if (!editState) return;
+  const drag = editState.drag;
+  if (!drag) return;
+  const nextOffsetX = clamp(drag.startOffsetX - deltaX, 0, drag.overflowX);
+  const nextOffsetY = clamp(drag.startOffsetY - deltaY, 0, drag.overflowY);
+  editState.pos.x = drag.overflowX ? (nextOffsetX / drag.overflowX) * 100 : 50;
+  editState.pos.y = drag.overflowY ? (nextOffsetY / drag.overflowY) * 100 : 50;
+  applyCropToImage(editState, frameEl, imgEl);
+}
+
+function startCropDrag(editState, frameEl, startX, startY){
+  if (!editState || !frameEl) return;
   const frameRect = frameEl.getBoundingClientRect();
   const frameW = frameRect.width || 1;
   const frameH = frameRect.height || 1;
   const { imgW, imgH } = editState;
   const zoom = clampZoom(editState.zoom || 1);
   const { overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, zoom);
-  const startPos = editState.startPos || {x:50, y:50};
-  const startOffsetX = overflowX ? (startPos.x / 100) * overflowX : 0;
-  const startOffsetY = overflowY ? (startPos.y / 100) * overflowY : 0;
-  const nextOffsetX = clamp(startOffsetX - deltaX, 0, overflowX);
-  const nextOffsetY = clamp(startOffsetY - deltaY, 0, overflowY);
-  editState.pos.x = overflowX ? (nextOffsetX / overflowX) * 100 : 50;
-  editState.pos.y = overflowY ? (nextOffsetY / overflowY) * 100 : 50;
-  applyCropToImage(editState, frameEl, imgEl);
+  editState.pos = clampCropPosition(editState.pos || {x:50, y:50}, overflowX, overflowY);
+  editState.drag = {
+    startX,
+    startY,
+    overflowX,
+    overflowY,
+    startOffsetX: overflowX ? (editState.pos.x / 100) * overflowX : 0,
+    startOffsetY: overflowY ? (editState.pos.y / 100) * overflowY : 0,
+  };
 }
 
 async function refreshSeriesCover(seriesId){
@@ -2192,7 +2231,7 @@ function initEvents(){
     state.thumbEdit.isDragging = true;
     state.thumbEdit.startX = evt.clientX;
     state.thumbEdit.startY = evt.clientY;
-    state.thumbEdit.startPos = {...state.thumbEdit.pos};
+    startCropDrag(state.thumbEdit, els.thumbFrame, evt.clientX, evt.clientY);
     els.thumbFrame.setPointerCapture(evt.pointerId);
   });
   els.thumbFrame.addEventListener("pointermove", (evt) => {
@@ -2208,6 +2247,7 @@ function initEvents(){
   const endThumbDrag = (evt) => {
     if (!state.thumbEdit) return;
     state.thumbEdit.isDragging = false;
+    state.thumbEdit.drag = null;
     if (evt?.pointerId) els.thumbFrame.releasePointerCapture(evt.pointerId);
   };
   els.thumbFrame.addEventListener("pointerup", endThumbDrag);
@@ -2216,7 +2256,6 @@ function initEvents(){
   els.thumbReset.addEventListener("click", () => {
     if (!state.thumbEdit) return;
     state.thumbEdit.pos = {x:50, y:50};
-    state.thumbEdit.startPos = {x:50, y:50};
     state.thumbEdit.zoom = 1;
     applyCropToImage(state.thumbEdit, els.thumbFrame, els.thumbImage);
     updateZoomUI(state.thumbEdit, els.thumbZoom, els.thumbZoomValue);
@@ -2250,7 +2289,7 @@ function initEvents(){
     state.coverEdit.isDragging = true;
     state.coverEdit.startX = evt.clientX;
     state.coverEdit.startY = evt.clientY;
-    state.coverEdit.startPos = {...state.coverEdit.pos};
+    startCropDrag(state.coverEdit, els.coverFrame, evt.clientX, evt.clientY);
     els.coverFrame.setPointerCapture(evt.pointerId);
   });
   els.coverFrame.addEventListener("pointermove", (evt) => {
@@ -2266,6 +2305,7 @@ function initEvents(){
   const endCoverDrag = (evt) => {
     if (!state.coverEdit) return;
     state.coverEdit.isDragging = false;
+    state.coverEdit.drag = null;
     if (evt?.pointerId) els.coverFrame.releasePointerCapture(evt.pointerId);
   };
   els.coverFrame.addEventListener("pointerup", endCoverDrag);
@@ -2274,7 +2314,6 @@ function initEvents(){
   els.coverReset.addEventListener("click", () => {
     if (!state.coverEdit) return;
     state.coverEdit.pos = {x:50, y:50};
-    state.coverEdit.startPos = {x:50, y:50};
     state.coverEdit.zoom = 1;
     applyCropToImage(state.coverEdit, els.coverFrame, els.coverImage);
     updateZoomUI(state.coverEdit, els.coverZoom, els.coverZoomValue);
