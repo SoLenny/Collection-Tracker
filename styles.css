@@ -413,6 +413,8 @@ label.file input{display:none}
   border-radius:18px;
   overflow:hidden;
   background:rgba(0,0,0,0.2);
+  width:100%;
+  max-width:100%;
 }
 .open-image-btn{
   position:absolute;
@@ -694,23 +696,30 @@ label.file input{display:none}
 .dialog-actions{display:flex; justify-content:flex-end; gap:10px; margin-top:14px;}
 .dialog-small{margin-top:10px; font-size:12px; color:var(--muted2);}
 .dialog.image-viewer .dialog-card{
-  width:auto;
-  max-width:min(92vw, 1100px);
+  width:min(92vw, 1100px);
+  max-height:88vh;
   padding:12px;
 }
 .dialog-image{
   display:flex;
   flex-direction:column;
   gap:10px;
-  align-items:flex-end;
+  align-items:center;
+  width:100%;
+  max-height:80vh;
 }
 .viewer-image{
-  max-width:88vw;
-  max-height:80vh;
+  width:100%;
+  height:100%;
+  max-width:100%;
+  max-height:100%;
+  object-fit:contain;
+  object-position:center;
   border-radius:12px;
   border:1px solid rgba(255,255,255,0.1);
 }
 .image-close{
+  align-self:flex-end;
   width:28px;
   height:28px;
   border-radius:10px;
