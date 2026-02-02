@@ -1,4 +1,4 @@
-const VERSION = "v4.1.2";
+const VERSION = "v4.1.3";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -134,6 +134,8 @@ const els = {
   seriesStats: $("#seriesStats"),
   partSelect: $("#partSelect"),
   partFilter: $("#partFilter"),
+  toggleAllTrade: $("#toggleAllTrade"),
+  toggleAllReceived: $("#toggleAllReceived"),
   fileImage: $("#fileImage"),
   btnUndo: $("#btnUndo"),
   btnDeletePart: $("#btnDeletePart"),
@@ -163,6 +165,7 @@ let state = {
   cards: [],
 
   statusFilter: "all",
+  partFilter: "all",
 
   image: null,
   imageURL: null,
@@ -207,6 +210,14 @@ function computeProgress(cards){
   const { total, received } = humanStats(cards);
   const pct = total ? Math.round((received/total)*100) : 0;
   return { total, received, pct };
+}
+function setStatusFilter(filter){
+  state.statusFilter = filter;
+  $$(".chip").forEach(x => x.classList.toggle("active", x.dataset.filter === filter));
+}
+function setPartFilter(filter){
+  state.partFilter = filter;
+  renderPartFilter();
 }
 function nextAutoCollectionName(){
   let maxN = 0;
@@ -410,8 +421,8 @@ async function openSeries(seriesId){
   state.parts = (await db.getAllByIndex("parts","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
   state.cards = (await db.getAllByIndex("cards","seriesId", seriesId)).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
 
-  state.statusFilter = "all";
-  $$(".chip").forEach(ch => ch.classList.toggle("active", ch.dataset.filter==="all"));
+  setStatusFilter("all");
+  setPartFilter("all");
 
   els.seriesName.value = s.name || "";
 
@@ -464,13 +475,20 @@ function renderPartFilter(){
     return;
   }
   els.partFilter.disabled = false;
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "Все";
+  els.partFilter.appendChild(all);
   for (const p of state.parts){
     const o = document.createElement("option");
     o.value = p.id;
     o.textContent = `Часть ${p.index}`;
     els.partFilter.appendChild(o);
   }
-  els.partFilter.value = state.activePartId || state.parts[0].id;
+  if (state.partFilter !== "all" && !state.parts.some(p=>p.id===state.partFilter)){
+    state.partFilter = "all";
+  }
+  els.partFilter.value = state.partFilter;
 }
 
 function updatePartsUIVisibility(){
@@ -613,6 +631,7 @@ function renderStats(){
 
 function filterCards(cards){
   let out = cards;
+  if (state.partFilter !== "all") out = out.filter(c=>c.partId===state.partFilter);
   if (state.statusFilter === "trade") out = out.filter(c=>c.foundTrade);
   else if (state.statusFilter === "received") out = out.filter(c=>c.received);
   else if (state.statusFilter === "pending") out = out.filter(c=>!c.received);
@@ -681,6 +700,7 @@ async function renderCardsList(){
 
     const wrap = document.createElement("div");
     wrap.className = "card";
+    wrap.dataset.cardId = c.id;
 
     const mini = document.createElement("div");
     mini.className = "mini";
@@ -723,13 +743,6 @@ async function renderCardsList(){
     const cb1 = document.createElement("input");
     cb1.type = "checkbox";
     cb1.checked = !!c.foundTrade;
-    cb1.addEventListener("change", async () => {
-      c.foundTrade = cb1.checked;
-      c.updatedAt = Date.now();
-      await db.put("cards", c);
-      await touchSeriesUpdated();
-      refreshStatsAndRender();
-    });
     t1.append(cb1, Object.assign(document.createElement("span"), {textContent:"Обмен найден"}));
 
     const t2 = document.createElement("label");
@@ -737,14 +750,27 @@ async function renderCardsList(){
     const cb2 = document.createElement("input");
     cb2.type = "checkbox";
     cb2.checked = !!c.received;
-    cb2.addEventListener("change", async () => {
-      c.received = cb2.checked;
+    t2.append(cb2, Object.assign(document.createElement("span"), {textContent:"Получено"}));
+
+    cb1.addEventListener("change", async () => {
+      applyFoundTrade(c, cb1.checked);
+      cb1.checked = c.foundTrade;
+      cb2.checked = c.received;
       c.updatedAt = Date.now();
       await db.put("cards", c);
       await touchSeriesUpdated();
       refreshStatsAndRender();
     });
-    t2.append(cb2, Object.assign(document.createElement("span"), {textContent:"Получено"}));
+
+    cb2.addEventListener("change", async () => {
+      applyReceived(c, cb2.checked);
+      cb1.checked = c.foundTrade;
+      cb2.checked = c.received;
+      c.updatedAt = Date.now();
+      await db.put("cards", c);
+      await touchSeriesUpdated();
+      refreshStatsAndRender();
+    });
 
     checks.append(t1,t2);
 
@@ -800,13 +826,7 @@ async function renderCardsList(){
 }
 
 async function showCardOnCanvas(card){
-  if (card.partId && card.partId !== state.activePartId){
-    state.activePartId = card.partId;
-    localStorage.setItem("ct_last_part_"+state.activeSeriesId, state.activePartId);
-    await loadActivePartImage();
-    renderPartSelect();
-    resizeCanvasAndRedraw();
-  }
+  await setActivePart(card.partId);
   els.canvas.scrollIntoView({behavior:"smooth", block:"center"});
   state.highlightCardId = card.id;
   state.focusCardId = card.id;
@@ -830,6 +850,83 @@ function refreshStatsAndRender(){
   renderPartFilter();
   renderCardsList();
   draw();
+}
+
+function applyFoundTrade(card, value){
+  card.foundTrade = value;
+  if (!value && card.received) card.received = false;
+}
+
+function applyReceived(card, value){
+  card.received = value;
+  if (value) card.foundTrade = true;
+}
+
+async function setActivePart(partId){
+  if (!partId || partId === state.activePartId) return;
+  state.activePartId = partId;
+  localStorage.setItem("ct_last_part_"+state.activeSeriesId, partId);
+  renderPartSelect();
+  await loadActivePartImage();
+  resizeCanvasAndRedraw();
+  draw();
+}
+
+function highlightCardInList(cardId){
+  const cardEl = els.cardsList.querySelector(`[data-card-id="${cardId}"]`);
+  if (!cardEl) return;
+  cardEl.classList.remove("pulse-highlight");
+  void cardEl.offsetWidth;
+  cardEl.classList.add("pulse-highlight");
+  cardEl.scrollIntoView({behavior:"smooth", block:"center"});
+  setTimeout(() => cardEl.classList.remove("pulse-highlight"), 1500);
+}
+
+async function focusCardInList(card){
+  let needsRender = false;
+  if (state.statusFilter !== "all"){
+    setStatusFilter("all");
+    needsRender = true;
+  }
+  if (state.partFilter !== "all"){
+    state.partFilter = "all";
+    needsRender = true;
+  }
+  if (needsRender){
+    renderPartFilter();
+  }
+  await renderCardsList();
+  requestAnimationFrame(() => highlightCardInList(card.id));
+}
+
+async function toggleAllFoundTrade(){
+  if (!state.activePartId) return;
+  const partCards = state.cards.filter(c=>c.partId===state.activePartId);
+  if (!partCards.length) return;
+  const allOn = partCards.every(c=>c.foundTrade);
+  const next = !allOn;
+  for (const c of partCards){
+    applyFoundTrade(c, next);
+    c.updatedAt = Date.now();
+    await db.put("cards", c);
+  }
+  await touchSeriesUpdated();
+  refreshStatsAndRender();
+}
+
+async function toggleAllReceived(){
+  if (!state.activePartId) return;
+  const partCards = state.cards.filter(c=>c.partId===state.activePartId);
+  if (!partCards.length) return;
+  const allOn = partCards.every(c=>c.received);
+  const next = !allOn;
+  for (const c of partCards){
+    applyReceived(c, next);
+    c.updatedAt = Date.now();
+    await db.put("cards", c);
+  }
+  await touchSeriesUpdated();
+  refreshStatsAndRender();
 }
 
 /* ---------- Create / Delete series ---------- */
@@ -1017,6 +1114,21 @@ function imageToCanvasCoords(ix, iy){
   return { cx: dx + ix*state.imageScale, cy: dy + iy*state.imageScale };
 }
 
+function findCardAtPoint(ix, iy){
+  const partCards = state.cards.filter(c=>c.partId===state.activePartId);
+  let best = null;
+  let bestArea = Infinity;
+  for (const c of partCards){
+    if (ix < c.x || ix > c.x + c.w || iy < c.y || iy > c.y + c.h) continue;
+    const area = Math.max(1, c.w) * Math.max(1, c.h);
+    if (area < bestArea){
+      bestArea = area;
+      best = c;
+    }
+  }
+  return best;
+}
+
 function resizeCanvasAndRedraw(){
   const parent = canvas.parentElement;
   if (!parent) return;
@@ -1127,12 +1239,26 @@ function onPointerMove(evt){
   state.drag.curX = x; state.drag.curY = y;
   draw();
 }
-async function onPointerUp(){
+async function onPointerUp(evt){
   if (!state.drag.active) return;
   state.drag.active = false;
 
   const rr = rectNormalize(state.drag.startX, state.drag.startY, state.drag.curX, state.drag.curY);
-  if (!rectValid(rr)){ draw(); return; }
+  if (!rectValid(rr)){
+    if (evt){
+      const {x, y} = canvasToImageCoords(state.drag.curX, state.drag.curY);
+      const hit = findCardAtPoint(x, y);
+      if (hit){
+        await setActivePart(hit.partId);
+        await focusCardInList(hit);
+        state.highlightCardId = hit.id;
+        draw();
+        return;
+      }
+    }
+    draw();
+    return;
+  }
 
   const p1 = canvasToImageCoords(rr.x, rr.y);
   const p2 = canvasToImageCoords(rr.x+rr.w, rr.y+rr.h);
@@ -1218,30 +1344,19 @@ function initEvents(){
   els.partSelect.addEventListener("change", async () => {
     const id = els.partSelect.value;
     if (!id || id === state.activePartId) return;
-    state.activePartId = id;
-    localStorage.setItem("ct_last_part_"+state.activeSeriesId, id);
-    renderPartFilter();
-    await loadActivePartImage();
-    resizeCanvasAndRedraw();
-    draw();
+    await setActivePart(id);
   });
 
   els.partFilter.addEventListener("change", async () => {
     const id = els.partFilter.value;
-    if (!id || id === state.activePartId) return;
-    state.activePartId = id;
-    localStorage.setItem("ct_last_part_"+state.activeSeriesId, id);
-    renderPartSelect();
-    await loadActivePartImage();
-    resizeCanvasAndRedraw();
-    draw();
+    if (!id || id === state.partFilter) return;
+    state.partFilter = id;
+    await renderCardsList();
   });
 
   $$(".chip").forEach(ch => {
     ch.addEventListener("click", async () => {
-      $$(".chip").forEach(x=>x.classList.remove("active"));
-      ch.classList.add("active");
-      state.statusFilter = ch.dataset.filter;
+      setStatusFilter(ch.dataset.filter);
       await renderCardsList();
     });
   });
@@ -1258,6 +1373,9 @@ function initEvents(){
     await deletePart(state.activePartId);
   });
   els.btnDeleteSeries.addEventListener("click", deleteActiveSeries);
+
+  els.toggleAllTrade.addEventListener("click", toggleAllFoundTrade);
+  els.toggleAllReceived.addEventListener("click", toggleAllReceived);
 
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
