@@ -50,7 +50,7 @@
           <div class="hint-title">Быстро</div>
           <ol>
             <li>Создай серию.</li>
-            <li>Добавь изображение (это будет <b>Часть 1</b>).</li>
+            <li>Добавь изображения листов.</li>
             <li>Выделяй открытки рамкой, отмечай статус и добавляй примечания.</li>
           </ol>
           <div class="hint-small">Данные хранятся на устройстве (IndexedDB). Экспорт/импорт — для бэкапов и переноса.</div>
@@ -92,16 +92,16 @@
       <div id="seriesView" class="series-view hidden">
         <div class="series-toolbar">
           <div class="series-toolbar-left">
-            <input id="seriesName" class="series-name" type="text" placeholder="Название серии" maxlength="60" />
-            <div class="series-stats" id="seriesStats">—</div>
-            <select id="partSelect" class="select part-select"></select>
+            <div class="series-title-block">
+              <input id="seriesName" class="series-name" type="text" placeholder="Название серии" maxlength="60" />
+              <div class="series-stats" id="seriesStats">—</div>
+            </div>
           </div>
 
           <div class="series-toolbar-right">
             <div class="series-actions">
               <div class="series-actions-row">
-                <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение в текущей части">↶ Отменить</button>
-                <button id="btnDeletePart" class="btn danger ghost" title="Удалить текущую часть">Удалить часть</button>
+                <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение">↶ Отменить</button>
                 <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
               </div>
               <div class="series-actions-row">
@@ -120,9 +120,7 @@
               <div class="dropzone-title">Перетащи изображения сюда или нажми «Добавить изображение»</div>
               <div class="dropzone-sub">Можно загрузить сразу несколько файлов.</div>
             </div>
-            <div class="canvas-wrap">
-              <canvas id="canvas" width="1200" height="800"></canvas>
-            </div>
+            <div class="image-blocks" id="imageBlocks"></div>
 
             <div class="canvas-help" id="canvasHelp">
               <div><b>Выделение:</b> потяни рамку по открытке (мышкой или пальцем).</div>
@@ -140,14 +138,10 @@
                   <button class="chip" data-filter="trade">Обмен найден</button>
                   <button class="chip" data-filter="received">Получено</button>
                   <button class="chip" data-filter="pending">Жду</button>
-                  <button class="chip" data-filter="notfound">Не найдено</button>
+                  <button class="chip" data-filter="missing">Не найдено</button>
                 </div>
 
                 <div class="cards-controls-right">
-                  <div class="part-filter">
-                    <span class="part-filter-label">Фильтр: Часть</span>
-                    <select id="partFilter" class="select"></select>
-                  </div>
                   <div class="toggle-all">
                     <label class="toggle master-toggle">
                       <input id="masterTrade" type="checkbox" />
@@ -199,7 +193,7 @@
     <form method="dialog" class="dialog-card">
       <div class="dialog-title">Справка</div>
       <div class="dialog-text">
-        <p><b>Части:</b> в одной серии может быть несколько изображений (Часть 1, Часть 2...).</p>
+        <p><b>Изображения:</b> в одной серии может быть несколько листов, все они показываются вместе.</p>
         <p><b>Добавление открыток:</b> потяни рамку на изображении — появится карточка справа.</p>
         <p><b>Данные:</b> сохраняются на этом устройстве (IndexedDB). Для переноса используй Экспорт/Импорт.</p>
       </div>
@@ -256,6 +250,6 @@
   </dialog>
 
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v4.1.7</div>
+  <div class="version-badge" id="versionBadge">v4.2.0</div>
 </body>
 </html>
