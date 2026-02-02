@@ -1,13 +1,10 @@
-const VERSION = "v4.1.7";
-// Collection Tracker v4
-// - Home page with series cards + progress (received/total)
-// - Series page: multiple images per series (Часть N)
-// - Single shared card list across parts; filter by status and by part
-// - Notes per card
-// - "Показать" switches to correct part and highlights the rect
+const VERSION = "v4.2.0";
+// Collection Tracker v4.2
+// - Series page: multiple images per collection (flat)
+// - All images visible on the collection screen
+// - Cards belong to images, single list with filters
+// - Notes per card, cover + thumbnail cropping
 // - In-app confirm dialogs, no browser confirm
-// - Series name optional -> auto "Коллекция N"
-// - Service worker tuned to avoid stale cache
 
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
@@ -30,22 +27,25 @@ class DB {
           if (!s.indexNames.contains("updatedAt")) s.createIndex("updatedAt","updatedAt",{unique:false});
         }
 
-        if (!db.objectStoreNames.contains("parts")) {
-          const p = db.createObjectStore("parts", { keyPath: "id" });
-          p.createIndex("seriesId", "seriesId", { unique:false });
-          p.createIndex("seriesId_index", ["seriesId","index"], { unique:false });
-          p.createIndex("updatedAt", "updatedAt", { unique:false });
+        if (!db.objectStoreNames.contains("images")) {
+          const i = db.createObjectStore("images", { keyPath: "id" });
+          i.createIndex("seriesId", "seriesId", { unique:false });
+          i.createIndex("seriesId_index", ["seriesId","index"], { unique:false });
+          i.createIndex("updatedAt", "updatedAt", { unique:false });
+        } else {
+          const i = req.transaction.objectStore("images");
+          if (!i.indexNames.contains("seriesId")) i.createIndex("seriesId","seriesId",{unique:false});
+          if (!i.indexNames.contains("seriesId_index")) i.createIndex("seriesId_index",["seriesId","index"],{unique:false});
+          if (!i.indexNames.contains("updatedAt")) i.createIndex("updatedAt","updatedAt",{unique:false});
         }
 
         if (!db.objectStoreNames.contains("cards")) {
           const c = db.createObjectStore("cards", { keyPath: "id" });
           c.createIndex("seriesId", "seriesId", { unique:false });
-          c.createIndex("partId", "partId", { unique:false });
           c.createIndex("updatedAt", "updatedAt", { unique:false });
         } else {
           const c = req.transaction.objectStore("cards");
           if (!c.indexNames.contains("seriesId")) c.createIndex("seriesId","seriesId",{unique:false});
-          if (!c.indexNames.contains("partId")) c.createIndex("partId","partId",{unique:false});
           if (!c.indexNames.contains("updatedAt")) c.createIndex("updatedAt","updatedAt",{unique:false});
         }
       };
@@ -109,7 +109,7 @@ class DB {
   }
 }
 
-const db = new DB("collection_tracker_v1", 2);
+const db = new DB("collection_tracker_v1", 3);
 
 /* ---------- UI refs ---------- */
 const els = {
@@ -135,17 +135,15 @@ const els = {
   seriesView: $("#seriesView"),
   seriesName: $("#seriesName"),
   seriesStats: $("#seriesStats"),
-  partSelect: $("#partSelect"),
-  partFilter: $("#partFilter"),
   masterTrade: $("#masterTrade"),
   masterReceived: $("#masterReceived"),
   fileImage: $("#fileImage"),
   btnUndo: $("#btnUndo"),
-  btnDeletePart: $("#btnDeletePart"),
   btnDeleteSeries: $("#btnDeleteSeries"),
 
   dropzone: $("#dropzone"),
   seriesLeftcol: $("#seriesLeftcol"),
+  imageBlocks: $("#imageBlocks"),
 
   cardsList: $("#cardsList"),
 
@@ -177,38 +175,36 @@ const els = {
   coverZoomOut: $("#coverZoomOut"),
   coverZoomValue: $("#coverZoomValue"),
 
-  canvas: $("#canvas"),
 };
 
 let state = {
   series: [],
   activeSeriesId: null,
-  parts: [],
-  activePartId: null,
+  images: [],
   cards: [],
 
   statusFilter: "all",
-  partFilter: "all",
   seriesSearch: "",
   homeSortKey: "updated",
   homeSortDir: "desc",
 
-  image: null,
-  imageURL: null,
-  imageScale: 1,
-  hoverCardId: null,
+  imageBlocks: new Map(),
+  activeImageId: null,
   listHoverCardId: null,
   selectedCardId: null,
   imageViewer: null,
+  viewerCanvas: null,
+  viewerCtx: null,
+  viewerImageId: null,
   viewerImage: null,
-  openImageButton: null,
+  viewerZoom: 1,
+  viewerDrag: { active:false, startX:0, startY:0, curX:0, curY:0 },
   focusCardId: null,
   focusUntil: 0,
   focusStart: 0,
   focusAnimationId: null,
 
-  drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
-  imageByPart: new Map(),
+  imageById: new Map(),
   coverCache: new Map(),
   thumbEdit: null,
   coverEdit: null,
@@ -378,10 +374,6 @@ function setStatusFilter(filter){
   state.statusFilter = filter;
   $$(".chip").forEach(x => x.classList.toggle("active", x.dataset.filter === filter));
 }
-function setPartFilter(filter){
-  state.partFilter = filter;
-  renderPartFilter();
-}
 function nextAutoCollectionName(){
   let maxN = 0;
   for (const s of state.series){
@@ -394,45 +386,88 @@ function nextAutoCollectionName(){
 /* ---------- Migration ---------- */
 async function migrateIfNeeded(){
   const allSeries = await db.getAll("series");
+  const hasPartsStore = db.db?.objectStoreNames?.contains("parts");
   for (const s of allSeries){
-    const parts = await db.getAllByIndex("parts","seriesId", s.id);
+    const images = await db.getAllByIndex("images","seriesId", s.id);
+    const legacyParts = hasPartsStore ? await db.getAllByIndex("parts","seriesId", s.id) : [];
     const cards = await db.getAllByIndex("cards","seriesId", s.id);
 
-    const hasLegacyImage = !!s.imageBlob;
-    const hasParts = parts.length > 0;
-
-    if (!hasParts && hasLegacyImage){
-      const partId = uid("part");
-      await db.put("parts", {
-        id: partId,
-        seriesId: s.id,
-        index: 1,
-        title: "Часть 1",
-        imageBlob: s.imageBlob,
-        imageW: s.imageW || null,
-        imageH: s.imageH || null,
-        createdAt: s.createdAt || Date.now(),
-        updatedAt: Date.now(),
-      });
-      for (const c of cards){
-        c.partId = partId;
-        if (c.note === undefined) c.note = "";
-        c.updatedAt = Date.now();
-        await db.put("cards", c);
-      }
-      delete s.imageBlob; delete s.imageW; delete s.imageH;
-      s.updatedAt = Date.now();
-      await db.put("series", s);
-    } else {
-      const sortedParts = parts.slice().sort((a,b)=>a.index-b.index);
-      const fallbackPartId = sortedParts[0]?.id || null;
-      for (const c of cards){
-        let changed = false;
-        if (c.note === undefined){ c.note = ""; changed = true; }
-        if (!c.partId && fallbackPartId){ c.partId = fallbackPartId; changed = true; }
-        if (changed){ c.updatedAt = Date.now(); await db.put("cards", c); }
+    const createdImages = [];
+    if (!images.length){
+      if (legacyParts.length){
+        const sortedParts = legacyParts.slice().sort((a,b)=>a.index-b.index);
+        for (let i=0; i<sortedParts.length; i++){
+          const p = sortedParts[i];
+          const image = {
+            id: p.id,
+            seriesId: s.id,
+            index: p.index || (i + 1),
+            imageBlob: p.imageBlob,
+            imageW: p.imageW || null,
+            imageH: p.imageH || null,
+            createdAt: p.createdAt || Date.now(),
+            updatedAt: Date.now(),
+          };
+          await db.put("images", image);
+          createdImages.push(image);
+        }
+      } else if (s.imageBlob){
+        const image = {
+          id: uid("image"),
+          seriesId: s.id,
+          index: 1,
+          imageBlob: s.imageBlob,
+          imageW: s.imageW || null,
+          imageH: s.imageH || null,
+          createdAt: s.createdAt || Date.now(),
+          updatedAt: Date.now(),
+        };
+        await db.put("images", image);
+        createdImages.push(image);
       }
     }
+
+    const imageList = images.length ? images : createdImages;
+    const fallbackImageId = imageList[0]?.id || null;
+    for (const c of cards){
+      let changed = false;
+      if (c.note === undefined){ c.note = ""; changed = true; }
+      if (c.thumbZoom === undefined){ c.thumbZoom = 1; changed = true; }
+      if (!c.imageId){
+        if (c.partId){
+          c.imageId = c.partId;
+          changed = true;
+        } else if (fallbackImageId){
+          c.imageId = fallbackImageId;
+          changed = true;
+        }
+      }
+      if (c.partId !== undefined){
+        delete c.partId;
+        changed = true;
+      }
+      if (changed){ c.updatedAt = Date.now(); await db.put("cards", c); }
+    }
+
+    let seriesChanged = false;
+    if (s.coverPartId && !s.coverImageId){
+      s.coverImageId = s.coverPartId;
+      seriesChanged = true;
+    }
+    if (s.coverPartId !== undefined){ delete s.coverPartId; seriesChanged = true; }
+    if (s.imageBlob){
+      delete s.imageBlob;
+      delete s.imageW;
+      delete s.imageH;
+      seriesChanged = true;
+    }
+    if (seriesChanged){
+      s.updatedAt = Date.now();
+      await db.put("series", s);
+    }
+  }
+  if (hasPartsStore){
+    try { await db.clear("parts"); } catch(e) { /* ignore */ }
   }
 }
 
@@ -441,7 +476,9 @@ function showHome(){
   els.seriesView.classList.add("hidden");
   els.homeView.classList.remove("hidden");
   state.activeSeriesId = null;
-  state.activePartId = null;
+  state.activeImageId = null;
+  state.images = [];
+  clearImageBlocks();
   localStorage.removeItem("ct_last_series");
   renderSeriesList();
   renderHome();
@@ -511,13 +548,13 @@ function renderSeriesList(){
       const cover = await getSeriesCover(s.id);
       if (!cover.blob) return;
       const cached = state.coverCache.get(s.id);
-      const needsUrl = !cached || cached.partId !== cover.partId;
+      const needsUrl = !cached || cached.imageId !== cover.imageId;
       if (needsUrl){
         setCoverCache(s.id, cover);
       } else if (!cached){
         setCoverCache(s.id, cover);
       } else if (cached.pos.x !== cover.pos.x || cached.pos.y !== cover.pos.y || cached.zoom !== cover.zoom){
-        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, partId: cover.partId });
+        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, imageId: cover.imageId });
       }
       const url = state.coverCache.get(s.id)?.url;
       if (!url) return;
@@ -545,12 +582,12 @@ function escapeHtml(str){
 
 async function getSeriesCover(seriesId){
   const series = state.series.find(s => s.id === seriesId);
-  const parts = (await db.getAllByIndex("parts","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
-  if (!parts.length){
-    return { blob: null, pos: {x:50, y:50}, zoom: 1, partId: null };
+  const images = (await db.getAllByIndex("images","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
+  if (!images.length){
+    return { blob: null, pos: {x:50, y:50}, zoom: 1, imageId: null };
   }
-  const coverPartId = series?.coverPartId;
-  const part = parts.find(p => p.id === coverPartId) || parts[0];
+  const coverImageId = series?.coverImageId;
+  const image = images.find(p => p.id === coverImageId) || images[0];
   const rawPos = series?.coverPos || {x:50, y:50};
   const rawZoom = series?.coverZoom ?? 1;
   const pos = {
@@ -558,7 +595,7 @@ async function getSeriesCover(seriesId){
     y: clamp(Number(rawPos.y) || 50, 0, 100),
   };
   const zoom = clampZoom(rawZoom);
-  return { blob: part?.imageBlob || null, pos, zoom, partId: part?.id || null };
+  return { blob: image?.imageBlob || null, pos, zoom, imageId: image?.id || null };
 }
 
 function clearCoverCache(seriesId){
@@ -572,7 +609,7 @@ function setCoverCache(seriesId, cover){
   if (cached?.url) URL.revokeObjectURL(cached.url);
   if (!cover?.blob) return null;
   const url = URL.createObjectURL(cover.blob);
-  state.coverCache.set(seriesId, { url, pos: cover.pos, zoom: cover.zoom, partId: cover.partId });
+  state.coverCache.set(seriesId, { url, pos: cover.pos, zoom: cover.zoom, imageId: cover.imageId });
   return url;
 }
 
@@ -683,13 +720,13 @@ async function renderHome(){
       const cover = await getSeriesCover(s.id);
       if (!cover.blob) return;
       const cached = state.coverCache.get(s.id);
-      const needsUrl = !cached || cached.partId !== cover.partId;
+      const needsUrl = !cached || cached.imageId !== cover.imageId;
       if (needsUrl){
         setCoverCache(s.id, cover);
       } else if (!cached){
         setCoverCache(s.id, cover);
       } else if (cached.pos.x !== cover.pos.x || cached.pos.y !== cover.pos.y || cached.zoom !== cover.zoom){
-        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, partId: cover.partId });
+        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, imageId: cover.imageId });
       }
       const url = state.coverCache.get(s.id)?.url;
       if (!url) return;
@@ -737,100 +774,432 @@ async function openSeries(seriesId){
   showSeries();
   renderSeriesList();
 
-  state.parts = (await db.getAllByIndex("parts","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
+  state.images = (await db.getAllByIndex("images","seriesId", seriesId)).sort((a,b)=>(a.index||0)-(b.index||0));
+  let imageChanged = false;
+  for (let i=0; i<state.images.length; i++){
+    const img = state.images[i];
+    if (!img.index){
+      img.index = i + 1;
+      img.updatedAt = Date.now();
+      await db.put("images", img);
+      imageChanged = true;
+    }
+  }
+  if (imageChanged){
+    state.images.sort((a,b)=>(a.index||0)-(b.index||0));
+  }
   state.cards = (await db.getAllByIndex("cards","seriesId", seriesId)).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
 
   setStatusFilter("all");
-  setPartFilter("all");
   state.selectedCardId = null;
-  state.hoverCardId = null;
   state.listHoverCardId = null;
+  state.activeImageId = null;
 
   els.seriesName.value = s.name || "";
 
-  if (!state.parts.length){
-    state.activePartId = null;
-  } else {
-    const last = localStorage.getItem("ct_last_part_"+seriesId);
-    state.activePartId = (last && state.parts.some(p=>p.id===last)) ? last : state.parts[0].id;
-    localStorage.setItem("ct_last_part_"+seriesId, state.activePartId);
-  }
-
-  updatePartsUIVisibility();
   updateDropzoneVisibility();
-  renderPartSelect();
-  renderPartFilter();
-  await loadActivePartImage();
+  await renderImageBlocks();
   refreshStatsAndRender();
-  resizeCanvasAndRedraw();
   window.scrollTo({top:0, behavior:"smooth"});
 }
 
-/* ---------- Parts controls ---------- */
-function renderPartSelect(){
-  els.partSelect.innerHTML = "";
-  if (!state.parts.length){
-    const o = document.createElement("option");
-    o.value = "";
-    o.textContent = "—";
-    els.partSelect.appendChild(o);
-    els.partSelect.disabled = true;
-    return;
-  }
-  els.partSelect.disabled = false;
-  for (const p of state.parts){
-    const o = document.createElement("option");
-    o.value = p.id;
-    o.textContent = `Часть ${p.index}`;
-    els.partSelect.appendChild(o);
-  }
-  els.partSelect.value = state.activePartId || state.parts[0].id;
-}
-function renderPartFilter(){
-  els.partFilter.innerHTML = "";
-  if (!state.parts.length){
-    const o = document.createElement("option");
-    o.value = "";
-    o.textContent = "—";
-    els.partFilter.appendChild(o);
-    els.partFilter.disabled = true;
-    return;
-  }
-  els.partFilter.disabled = false;
-  const all = document.createElement("option");
-  all.value = "all";
-  all.textContent = "Все";
-  els.partFilter.appendChild(all);
-  for (const p of state.parts){
-    const o = document.createElement("option");
-    o.value = p.id;
-    o.textContent = `Часть ${p.index}`;
-    els.partFilter.appendChild(o);
-  }
-  if (state.partFilter !== "all" && !state.parts.some(p=>p.id===state.partFilter)){
-    state.partFilter = "all";
-  }
-  els.partFilter.value = state.partFilter;
-}
-
-function updatePartsUIVisibility(){
-  const hide = state.parts.length <= 1;
-  els.seriesView.classList.toggle("parts-hidden", hide);
-  els.btnDeletePart.disabled = state.parts.length === 0;
-  els.btnDeletePart.classList.toggle("hidden", state.parts.length === 0);
-}
-
 function updateDropzoneVisibility(){
-  const empty = state.parts.length === 0;
+  const empty = state.images.length === 0;
   els.seriesLeftcol.classList.toggle("leftcol--empty", empty);
-  updateOpenImageButtonState();
+  if (!empty){
+    els.seriesLeftcol.classList.remove("is-dragover");
+  }
 }
 
-function updateOpenImageButtonState(){
-  if (!state.openImageButton) return;
-  const canOpen = !!state.image && !!state.imageURL;
-  state.openImageButton.disabled = !canOpen;
-  state.openImageButton.classList.toggle("hidden", !canOpen);
+function clearImageBlocks(){
+  for (const block of state.imageBlocks.values()){
+    if (block.imageURL) URL.revokeObjectURL(block.imageURL);
+  }
+  state.imageBlocks.clear();
+  if (els.imageBlocks) els.imageBlocks.innerHTML = "";
+}
+
+async function renderImageBlocks(){
+  clearImageBlocks();
+  if (!els.imageBlocks) return;
+  if (!state.images.length){
+    updateDropzoneVisibility();
+    return;
+  }
+  const ordered = state.images.slice().sort((a,b)=>a.index-b.index);
+  let idx = 1;
+  for (const image of ordered){
+    await createImageBlock(image, idx);
+    idx += 1;
+  }
+  updateDropzoneVisibility();
+  requestAnimationFrame(() => resizeAllImageBlocks());
+}
+
+async function createImageBlock(image, idx){
+  const blockEl = document.createElement("div");
+  blockEl.className = "image-block";
+  blockEl.dataset.imageId = image.id;
+
+  const head = document.createElement("div");
+  head.className = "image-block-head";
+  const title = document.createElement("div");
+  title.className = "image-title";
+  title.textContent = `Изображение ${idx}`;
+
+  const openBtn = document.createElement("button");
+  openBtn.type = "button";
+  openBtn.className = "open-image-btn";
+  openBtn.title = "Открыть изображение";
+  openBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+    <path d="M4 5h16v14H4z" stroke="currentColor" stroke-width="1.6" />
+    <path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  </svg>`;
+  openBtn.addEventListener("click", (evt) => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    openImageViewer(image.id);
+  });
+
+  head.append(title, openBtn);
+
+  const wrap = document.createElement("div");
+  wrap.className = "image-canvas-wrap";
+  const canvas = document.createElement("canvas");
+  canvas.width = 1200;
+  canvas.height = 800;
+  wrap.appendChild(canvas);
+
+  blockEl.append(head, wrap);
+  els.imageBlocks.appendChild(blockEl);
+
+  const ctx = canvas.getContext("2d");
+  const { img, url } = image.imageBlob ? await loadImageFromBlob(image.imageBlob) : { img: null, url: null };
+  const block = {
+    imageId: image.id,
+    image,
+    blockEl,
+    canvas,
+    ctx,
+    imageEl: img,
+    imageURL: url,
+    imageScale: 1,
+    hoverCardId: null,
+    drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
+  };
+  state.imageBlocks.set(image.id, block);
+
+  canvas.addEventListener("pointerdown", (evt) => onImagePointerDown(evt, block));
+  canvas.addEventListener("pointermove", (evt) => onImagePointerMove(evt, block));
+  canvas.addEventListener("pointerup", (evt) => onImagePointerUp(evt, block));
+  canvas.addEventListener("pointercancel", (evt) => onImagePointerUp(evt, block));
+  canvas.addEventListener("pointerleave", () => {
+    if (block.hoverCardId){
+      block.hoverCardId = null;
+      drawImageBlock(block);
+    }
+  });
+  resizeImageBlock(block);
+  drawImageBlock(block);
+}
+
+function resizeAllImageBlocks(){
+  for (const block of state.imageBlocks.values()){
+    resizeImageBlock(block);
+  }
+}
+
+function resizeImageBlock(block){
+  const parent = block.canvas.parentElement;
+  if (!parent) return;
+  const cssW = parent.clientWidth;
+  const cssH = Math.min(Math.max(420, window.innerHeight - 320), 720);
+  block.canvas.style.width = cssW + "px";
+  block.canvas.style.height = cssH + "px";
+  block.canvas.width = devicePx(cssW);
+  block.canvas.height = devicePx(cssH);
+  computeImageScaleFor(block);
+  drawImageBlock(block);
+}
+
+function computeImageScaleFor(block){
+  if (!block.imageEl){ block.imageScale = 1; return; }
+  const sx = block.canvas.width / block.imageEl.width;
+  const sy = block.canvas.height / block.imageEl.height;
+  block.imageScale = Math.min(sx, sy);
+}
+function imageDrawRectFor(block){
+  if (!block.imageEl) return {dx:0, dy:0, dw: block.canvas.width, dh: block.canvas.height};
+  const dw = Math.floor(block.imageEl.width * block.imageScale);
+  const dh = Math.floor(block.imageEl.height * block.imageScale);
+  const dx = Math.floor((block.canvas.width - dw) / 2);
+  const dy = Math.floor((block.canvas.height - dh) / 2);
+  return {dx, dy, dw, dh};
+}
+function isPointInsideImage(block, cx, cy){
+  if (!block.imageEl) return false;
+  const {dx,dy,dw,dh} = imageDrawRectFor(block);
+  return cx>=dx && cx<=dx+dw && cy>=dy && cy<=dy+dh;
+}
+function pointerPos(evt, canvasEl){
+  const rect = canvasEl.getBoundingClientRect();
+  return {
+    x: (evt.clientX - rect.left) * devicePixelRatio,
+    y: (evt.clientY - rect.top) * devicePixelRatio
+  };
+}
+function canvasToImageCoords(block, cx, cy){
+  const {dx,dy} = imageDrawRectFor(block);
+  const x = (cx - dx) / block.imageScale;
+  const y = (cy - dy) / block.imageScale;
+  return { x: clamp(x,0,block.imageEl.width), y: clamp(y,0,block.imageEl.height) };
+}
+function imageToCanvasCoords(block, ix, iy){
+  const {dx,dy} = imageDrawRectFor(block);
+  return { cx: dx + ix*block.imageScale, cy: dy + iy*block.imageScale };
+}
+
+function findCardAtPoint(block, ix, iy){
+  const imageCards = state.cards.filter(c=>c.imageId===block.imageId);
+  let best = null;
+  let bestArea = Infinity;
+  for (const c of imageCards){
+    if (ix < c.x || ix > c.x + c.w || iy < c.y || iy > c.y + c.h) continue;
+    const area = Math.max(1, c.w) * Math.max(1, c.h);
+    if (area < bestArea){
+      bestArea = area;
+      best = c;
+    }
+  }
+  return best;
+}
+
+function drawImageBlock(block){
+  const ctx = block.ctx;
+  if (!ctx) return;
+  ctx.clearRect(0,0,block.canvas.width, block.canvas.height);
+
+  if (!block.imageEl){
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,0.05)";
+    ctx.fillRect(0,0,block.canvas.width, block.canvas.height);
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.font = `${Math.floor(16*devicePixelRatio)}px system-ui`;
+    const msg = "Добавь изображение, чтобы выделять открытки.";
+    ctx.fillText(msg, devicePx(18), devicePx(28));
+    ctx.restore();
+    return;
+  }
+
+  const r = imageDrawRectFor(block);
+  ctx.save();
+  ctx.globalAlpha = 0.96;
+  ctx.drawImage(block.imageEl, r.dx, r.dy, r.dw, r.dh);
+  ctx.restore();
+
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,0.20)";
+  ctx.fillRect(0,0,block.canvas.width, r.dy);
+  ctx.fillRect(0, r.dy+r.dh, block.canvas.width, block.canvas.height-(r.dy+r.dh));
+  ctx.fillRect(0, r.dy, r.dx, r.dh);
+  ctx.fillRect(r.dx+r.dw, r.dy, block.canvas.width-(r.dx+r.dw), r.dh);
+  ctx.restore();
+
+  const imageCards = state.cards.filter(c=>c.imageId===block.imageId);
+  const focusActive = state.focusCardId && state.focusUntil && (Date.now() < state.focusUntil);
+  const visibleIds = new Set();
+  if (block.hoverCardId) visibleIds.add(block.hoverCardId);
+  if (state.listHoverCardId) visibleIds.add(state.listHoverCardId);
+  if (state.selectedCardId) visibleIds.add(state.selectedCardId);
+  if (focusActive && state.focusCardId) visibleIds.add(state.focusCardId);
+  const showAll = block.drag.active;
+
+  for (const c of imageCards){
+    if (!showAll && !visibleIds.has(c.id)) continue;
+    const {cx:x1, cy:y1} = imageToCanvasCoords(block, c.x, c.y);
+    const {cx:x2, cy:y2} = imageToCanvasCoords(block, c.x+c.w, c.y+c.h);
+    const rr = rectNormalize(x1,y1,x2,y2);
+
+    const isFocus = focusActive && c.id === state.focusCardId;
+    const isHi = isFocus || block.hoverCardId===c.id || state.listHoverCardId===c.id || state.selectedCardId===c.id;
+    const isReceived = !!c.received;
+    const isTrade = !!c.foundTrade;
+
+    ctx.save();
+    let pulseBoost = 1;
+    if (isFocus){
+      const progress = clamp((Date.now() - state.focusStart) / Math.max(1, state.focusUntil - state.focusStart), 0, 1);
+      pulseBoost = 0.9 + Math.sin(progress * Math.PI) * 0.5;
+    }
+    ctx.lineWidth = devicePx(isHi ? (2.2 * pulseBoost) : 1.6);
+    ctx.globalAlpha = isFocus ? 0.95 : 0.85;
+
+    ctx.strokeStyle = isReceived ? "rgba(34,197,94,0.95)"
+                  : isTrade ? "rgba(245,158,11,0.95)"
+                  : "rgba(167,139,250,0.95)";
+    ctx.fillStyle = isReceived ? "rgba(34,197,94,0.12)"
+                 : isTrade ? "rgba(245,158,11,0.10)"
+                 : "rgba(167,139,250,0.10)";
+    ctx.beginPath();
+    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (block.drag.active){
+    const rr = rectNormalize(block.drag.startX, block.drag.startY, block.drag.curX, block.drag.curY);
+    ctx.save();
+    ctx.lineWidth = devicePx(2);
+    ctx.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx.setLineDash([devicePx(8), devicePx(6)]);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath();
+    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawAllImageBlocks(){
+  for (const block of state.imageBlocks.values()){
+    drawImageBlock(block);
+  }
+}
+
+async function onImagePointerDown(evt, block){
+  if (!block.imageEl) return;
+  block.canvas.setPointerCapture(evt.pointerId);
+  const {x,y} = pointerPos(evt, block.canvas);
+  if (!isPointInsideImage(block, x, y)) return;
+  state.activeImageId = block.imageId;
+  block.drag.active = true;
+  block.hoverCardId = null;
+  block.drag.startX = x; block.drag.startY = y;
+  block.drag.curX = x; block.drag.curY = y;
+  drawImageBlock(block);
+}
+function onImagePointerMove(evt, block){
+  const {x,y} = pointerPos(evt, block.canvas);
+  if (block.drag.active){
+    block.drag.curX = x; block.drag.curY = y;
+    drawImageBlock(block);
+    return;
+  }
+  if (!block.imageEl) return;
+  if (!isPointInsideImage(block, x, y)){
+    if (block.hoverCardId){
+      block.hoverCardId = null;
+      drawImageBlock(block);
+    }
+    return;
+  }
+  const {x:ix, y:iy} = canvasToImageCoords(block, x, y);
+  const hit = findCardAtPoint(block, ix, iy);
+  const nextId = hit ? hit.id : null;
+  if (nextId !== block.hoverCardId){
+    block.hoverCardId = nextId;
+    drawImageBlock(block);
+  }
+}
+async function onImagePointerUp(evt, block){
+  if (!block.drag.active) return;
+  block.drag.active = false;
+
+  const rr = rectNormalize(block.drag.startX, block.drag.startY, block.drag.curX, block.drag.curY);
+  if (!rectValid(rr)){
+    if (evt){
+      const {x, y} = canvasToImageCoords(block, block.drag.curX, block.drag.curY);
+      const hit = findCardAtPoint(block, x, y);
+      if (hit){
+        await focusCardInList(hit);
+        state.selectedCardId = hit.id;
+        drawImageBlock(block);
+        return;
+      }
+    }
+    state.selectedCardId = null;
+    drawImageBlock(block);
+    return;
+  }
+
+  const p1 = canvasToImageCoords(block, rr.x, rr.y);
+  const p2 = canvasToImageCoords(block, rr.x+rr.w, rr.y+rr.h);
+  const ir = rectNormalize(p1.x, p1.y, p2.x, p2.y);
+
+  const existing = state.cards.filter(c=>c.imageId===block.imageId);
+  if (bestOverlap(ir, existing) > 0.82){ drawImageBlock(block); return; }
+
+  const card = {
+    id: uid("card"),
+    seriesId: state.activeSeriesId,
+    imageId: block.imageId,
+    x: Math.round(ir.x),
+    y: Math.round(ir.y),
+    w: Math.round(ir.w),
+    h: Math.round(ir.h),
+    foundTrade: false,
+    received: false,
+    title: "",
+    note: "",
+    thumbPos: {x:50, y:50},
+    thumbZoom: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  await db.put("cards", card);
+  state.cards.push(card);
+  await touchSeriesUpdated();
+  refreshStatsAndRender();
+}
+
+async function addImageFromFile(file){
+  if (!file || !state.activeSeriesId) return;
+  const nextIdx = state.images.length ? Math.max(...state.images.map(p=>p.index)) + 1 : 1;
+
+  const { img, url } = await loadImageFromBlob(file);
+  const w = img?.naturalWidth || img?.width || null;
+  const h = img?.naturalHeight || img?.height || null;
+
+  const image = {
+    id: uid("image"),
+    seriesId: state.activeSeriesId,
+    index: nextIdx,
+    imageBlob: file,
+    imageW: w,
+    imageH: h,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await db.put("images", image);
+
+  state.images.push(image);
+  state.images.sort((a,b)=>a.index-b.index);
+
+  const series = state.series.find(s => s.id === state.activeSeriesId);
+  if (series && !series.coverImageId){
+    series.coverImageId = image.id;
+    series.coverPos = {x:50, y:50};
+    series.coverZoom = 1;
+    series.updatedAt = Date.now();
+    await db.put("series", series);
+  }
+
+  await touchSeriesUpdated();
+  if (url) URL.revokeObjectURL(url);
+  await renderImageBlocks();
+  refreshStatsAndRender();
+}
+
+async function addImagesFromFiles(files){
+  const list = Array.from(files || []).filter(f => f && f.type && f.type.startsWith("image/"));
+  if (!list.length) return;
+  for (const file of list){
+    await addImageFromFile(file);
+  }
+  updateDropzoneVisibility();
 }
 
 function setupImageViewer(){
@@ -839,8 +1208,22 @@ function setupImageViewer(){
   dialog.className = "dialog image-viewer";
   dialog.innerHTML = `
     <div class="dialog-card dialog-image">
-      <button type="button" class="image-close" aria-label="Закрыть">×</button>
-      <img class="viewer-image" alt="Изображение серии" />
+      <div class="viewer-head">
+        <div class="viewer-title">Просмотр изображения</div>
+        <button type="button" class="image-close" aria-label="Закрыть">×</button>
+      </div>
+      <div class="viewer-canvas-wrap">
+        <canvas class="viewer-canvas" width="1200" height="800"></canvas>
+      </div>
+      <div class="viewer-controls">
+        <div class="zoom-controls">
+          <button class="zoom-btn" type="button" data-zoom="-0.1" aria-label="Уменьшить">−</button>
+          <input class="zoom-slider" type="range" min="1" max="3" step="0.01" value="1" />
+          <button class="zoom-btn" type="button" data-zoom="0.1" aria-label="Увеличить">＋</button>
+          <span class="zoom-value">100%</span>
+        </div>
+        <div class="viewer-hint">Можно выделять новые открытки прямо здесь.</div>
+      </div>
     </div>
   `;
   dialog.addEventListener("click", (evt) => {
@@ -849,172 +1232,230 @@ function setupImageViewer(){
   document.body.appendChild(dialog);
   const closeBtn = dialog.querySelector(".image-close");
   closeBtn.addEventListener("click", () => dialog.close());
-  state.imageViewer = dialog;
-  state.viewerImage = dialog.querySelector(".viewer-image");
+  const canvas = dialog.querySelector(".viewer-canvas");
+  const ctx = canvas.getContext("2d");
+  const slider = dialog.querySelector(".zoom-slider");
+  const zoomValue = dialog.querySelector(".zoom-value");
+  const zoomButtons = dialog.querySelectorAll(".zoom-btn");
 
-  const canvasWrap = document.querySelector(".canvas-wrap");
-  if (canvasWrap){
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "open-image-btn";
-    btn.title = "Открыть изображение";
-    btn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none">
-      <path d="M4 5h16v14H4z" stroke="currentColor" stroke-width="1.6" />
-      <path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-    </svg>`;
-    btn.addEventListener("click", (evt) => {
-      evt.preventDefault();
-      evt.stopPropagation();
-      if (!state.imageViewer || !state.viewerImage || !state.imageURL) return;
-      state.viewerImage.src = state.imageURL;
-      state.imageViewer.showModal();
+  slider.addEventListener("input", () => {
+    state.viewerZoom = clampZoom(slider.value);
+    zoomValue.textContent = `${Math.round(state.viewerZoom * 100)}%`;
+    drawViewer();
+  });
+  zoomButtons.forEach(btn => {
+    btn.addEventListener("click", () => {
+      const delta = Number(btn.dataset.zoom || 0);
+      state.viewerZoom = clampZoom((state.viewerZoom || 1) + delta);
+      slider.value = String(state.viewerZoom);
+      zoomValue.textContent = `${Math.round(state.viewerZoom * 100)}%`;
+      drawViewer();
     });
-    canvasWrap.appendChild(btn);
-    state.openImageButton = btn;
-    updateOpenImageButtonState();
+  });
+
+  canvas.addEventListener("pointerdown", onViewerPointerDown);
+  canvas.addEventListener("pointermove", onViewerPointerMove);
+  canvas.addEventListener("pointerup", onViewerPointerUp);
+  canvas.addEventListener("pointercancel", onViewerPointerUp);
+
+  dialog.addEventListener("close", () => {
+    state.viewerImageId = null;
+    state.viewerImage = null;
+    state.viewerZoom = 1;
+    state.viewerDrag = { active:false, startX:0, startY:0, curX:0, curY:0 };
+  });
+
+  state.imageViewer = dialog;
+  state.viewerCanvas = canvas;
+  state.viewerCtx = ctx;
+}
+
+function openImageViewer(imageId){
+  if (!state.imageViewer) return;
+  const block = state.imageBlocks.get(imageId);
+  if (!block?.imageEl) return;
+  state.viewerImageId = imageId;
+  state.viewerImage = block.imageEl;
+  state.viewerZoom = 1;
+  const slider = state.imageViewer.querySelector(".zoom-slider");
+  const zoomValue = state.imageViewer.querySelector(".zoom-value");
+  if (slider){
+    slider.value = "1";
+  }
+  if (zoomValue) zoomValue.textContent = "100%";
+  state.imageViewer.showModal();
+  requestAnimationFrame(() => {
+    resizeViewerCanvas();
+    drawViewer();
+  });
+}
+
+function resizeViewerCanvas(){
+  if (!state.viewerCanvas) return;
+  const wrap = state.viewerCanvas.parentElement;
+  if (!wrap) return;
+  const cssW = wrap.clientWidth;
+  const cssH = wrap.clientHeight;
+  state.viewerCanvas.style.width = cssW + "px";
+  state.viewerCanvas.style.height = cssH + "px";
+  state.viewerCanvas.width = devicePx(cssW);
+  state.viewerCanvas.height = devicePx(cssH);
+}
+
+function viewerImageDrawRect(){
+  if (!state.viewerImage || !state.viewerCanvas) return {dx:0, dy:0, dw: state.viewerCanvas?.width || 1, dh: state.viewerCanvas?.height || 1};
+  const baseScale = Math.min(state.viewerCanvas.width / state.viewerImage.width, state.viewerCanvas.height / state.viewerImage.height);
+  const scale = baseScale * (state.viewerZoom || 1);
+  const dw = Math.floor(state.viewerImage.width * scale);
+  const dh = Math.floor(state.viewerImage.height * scale);
+  const dx = Math.floor((state.viewerCanvas.width - dw) / 2);
+  const dy = Math.floor((state.viewerCanvas.height - dh) / 2);
+  return {dx, dy, dw, dh, scale};
+}
+
+function isViewerPointInsideImage(x, y){
+  if (!state.viewerImage || !state.viewerCanvas) return false;
+  const r = viewerImageDrawRect();
+  return x >= r.dx && x <= r.dx + r.dw && y >= r.dy && y <= r.dy + r.dh;
+}
+
+function drawViewer(){
+  if (!state.viewerCtx || !state.viewerCanvas){
+    return;
+  }
+  const ctx = state.viewerCtx;
+  ctx.clearRect(0,0,state.viewerCanvas.width, state.viewerCanvas.height);
+  if (!state.viewerImage) return;
+
+  const r = viewerImageDrawRect();
+  ctx.save();
+  ctx.fillStyle = "rgba(18,18,28,0.92)";
+  ctx.fillRect(0,0,state.viewerCanvas.width, state.viewerCanvas.height);
+  ctx.globalAlpha = 1;
+  ctx.drawImage(state.viewerImage, r.dx, r.dy, r.dw, r.dh);
+  ctx.restore();
+
+  const imageCards = state.cards.filter(c=>c.imageId===state.viewerImageId);
+  const focusActive = state.focusCardId && state.focusUntil && (Date.now() < state.focusUntil);
+  const showAll = state.viewerDrag.active;
+  const visibleIds = new Set();
+  if (state.listHoverCardId) visibleIds.add(state.listHoverCardId);
+  if (state.selectedCardId) visibleIds.add(state.selectedCardId);
+  if (focusActive && state.focusCardId) visibleIds.add(state.focusCardId);
+
+  for (const c of imageCards){
+    if (!showAll && !visibleIds.has(c.id)) continue;
+    const x1 = r.dx + c.x * r.scale;
+    const y1 = r.dy + c.y * r.scale;
+    const x2 = r.dx + (c.x + c.w) * r.scale;
+    const y2 = r.dy + (c.y + c.h) * r.scale;
+    const rr = rectNormalize(x1,y1,x2,y2);
+    const isFocus = focusActive && c.id === state.focusCardId;
+    const isReceived = !!c.received;
+    const isTrade = !!c.foundTrade;
+    ctx.save();
+    ctx.lineWidth = devicePx(isFocus ? 2.2 : 1.6);
+    ctx.strokeStyle = isReceived ? "rgba(34,197,94,0.95)"
+                  : isTrade ? "rgba(245,158,11,0.95)"
+                  : "rgba(167,139,250,0.95)";
+    ctx.fillStyle = isReceived ? "rgba(34,197,94,0.12)"
+                 : isTrade ? "rgba(245,158,11,0.10)"
+                 : "rgba(167,139,250,0.10)";
+    ctx.beginPath();
+    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (state.viewerDrag.active){
+    const rr = rectNormalize(state.viewerDrag.startX, state.viewerDrag.startY, state.viewerDrag.curX, state.viewerDrag.curY);
+    ctx.save();
+    ctx.lineWidth = devicePx(2);
+    ctx.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx.setLineDash([devicePx(8), devicePx(6)]);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath();
+    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
   }
 }
 
-async function loadActivePartImage(){
-  if (state.imageURL){
-    URL.revokeObjectURL(state.imageURL);
-    state.imageURL = null;
-  }
-  state.image = null;
-  updateOpenImageButtonState();
-  if (!state.activePartId) return;
-
-  const p = state.parts.find(x=>x.id===state.activePartId);
-  if (!p || !p.imageBlob) return;
-  const { img, url } = await loadImageFromBlob(p.imageBlob);
-  state.imageURL = url;
-  state.image = img;
-  updateOpenImageButtonState();
+function onViewerPointerDown(evt){
+  if (!state.viewerCanvas || !state.viewerImage) return;
+  const {x,y} = pointerPos(evt, state.viewerCanvas);
+  if (!isViewerPointInsideImage(x, y)) return;
+  state.viewerCanvas.setPointerCapture(evt.pointerId);
+  state.viewerDrag.active = true;
+  state.viewerDrag.startX = x;
+  state.viewerDrag.startY = y;
+  state.viewerDrag.curX = x;
+  state.viewerDrag.curY = y;
+  drawViewer();
 }
 
-async function addPartFromFile(file){
-  if (!file || !state.activeSeriesId) return;
-  const nextIdx = state.parts.length ? Math.max(...state.parts.map(p=>p.index)) + 1 : 1;
+function onViewerPointerMove(evt){
+  if (!state.viewerCanvas) return;
+  if (!state.viewerDrag.active) return;
+  const {x,y} = pointerPos(evt, state.viewerCanvas);
+  state.viewerDrag.curX = x;
+  state.viewerDrag.curY = y;
+  drawViewer();
+}
 
-  const { img, url } = await loadImageFromBlob(file);
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  URL.revokeObjectURL(url);
+async function onViewerPointerUp(evt){
+  if (!state.viewerDrag.active) return;
+  state.viewerDrag.active = false;
+  if (!state.viewerImage || !state.viewerImageId || !state.viewerCanvas) return;
 
-  const part = {
-    id: uid("part"),
+  const rr = rectNormalize(state.viewerDrag.startX, state.viewerDrag.startY, state.viewerDrag.curX, state.viewerDrag.curY);
+  if (!rectValid(rr)){
+    drawViewer();
+    return;
+  }
+
+  const r = viewerImageDrawRect();
+  const ix1 = (rr.x - r.dx) / r.scale;
+  const iy1 = (rr.y - r.dy) / r.scale;
+  const ix2 = (rr.x + rr.w - r.dx) / r.scale;
+  const iy2 = (rr.y + rr.h - r.dy) / r.scale;
+  const ir = rectNormalize(
+    clamp(ix1, 0, state.viewerImage.width),
+    clamp(iy1, 0, state.viewerImage.height),
+    clamp(ix2, 0, state.viewerImage.width),
+    clamp(iy2, 0, state.viewerImage.height)
+  );
+  const existing = state.cards.filter(c=>c.imageId===state.viewerImageId);
+  if (bestOverlap(ir, existing) > 0.82){
+    drawViewer();
+    return;
+  }
+
+  const card = {
+    id: uid("card"),
     seriesId: state.activeSeriesId,
-    index: nextIdx,
-    title: `Часть ${nextIdx}`,
-    imageBlob: file,
-    imageW: w,
-    imageH: h,
+    imageId: state.viewerImageId,
+    x: Math.round(ir.x),
+    y: Math.round(ir.y),
+    w: Math.round(ir.w),
+    h: Math.round(ir.h),
+    foundTrade: false,
+    received: false,
+    title: "",
+    note: "",
+    thumbPos: {x:50, y:50},
+    thumbZoom: 1,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
-  await db.put("parts", part);
 
-  state.parts.push(part);
-  state.parts.sort((a,b)=>a.index-b.index);
-
-  state.activePartId = part.id;
-  localStorage.setItem("ct_last_part_"+state.activeSeriesId, state.activePartId);
-
-  updatePartsUIVisibility();
-  updateDropzoneVisibility();
-
-  const series = state.series.find(s => s.id === state.activeSeriesId);
-  if (series && !series.coverPartId){
-    series.coverPartId = part.id;
-    series.coverPos = {x:50, y:50};
-    series.coverZoom = 1;
-    series.updatedAt = Date.now();
-    await db.put("series", series);
-  }
-
+  await db.put("cards", card);
+  state.cards.push(card);
   await touchSeriesUpdated();
-  renderPartSelect();
-  renderPartFilter();
-  await loadActivePartImage();
-  resizeCanvasAndRedraw();
-  draw();
-}
-
-async function addPartsFromFiles(files){
-  const list = Array.from(files || []).filter(f => f && f.type && f.type.startsWith("image/"));
-  if (!list.length) return;
-  for (const file of list){
-    await addPartFromFile(file);
-  }
-  updatePartsUIVisibility();
-  updateDropzoneVisibility();
-}
-
-async function deletePart(partId){
-  if (!partId) return;
-  const part = state.parts.find(p=>p.id===partId);
-  if (!part) return;
-  const ok = await confirmDialog(
-    "Удалить часть?",
-    `Часть ${part.index} и все её открытки будут удалены.`,
-    "Удалить"
-  );
-  if (!ok) return;
-
-  const cardsToDelete = state.cards.filter(c=>c.partId===partId);
-  for (const c of cardsToDelete) await db.delete("cards", c.id);
-  await db.delete("parts", partId);
-
-  state.cards = state.cards.filter(c=>c.partId!==partId);
-  const removedIndex = state.parts.findIndex(p=>p.id===partId);
-  state.parts = state.parts.filter(p=>p.id!==partId);
-  state.parts.sort((a,b)=>a.index-b.index);
-
-  for (let i=0; i<state.parts.length; i++){
-    const p = state.parts[i];
-    const nextIndex = i + 1;
-    if (p.index !== nextIndex || p.title !== `Часть ${nextIndex}`){
-      p.index = nextIndex;
-      p.title = `Часть ${nextIndex}`;
-      p.updatedAt = Date.now();
-      await db.put("parts", p);
-    }
-  }
-
-  const series = state.series.find(s => s.id === state.activeSeriesId);
-  if (series && series.coverPartId === partId){
-    series.coverPartId = state.parts[0]?.id || null;
-    series.coverPos = {x:50, y:50};
-    series.coverZoom = 1;
-    series.updatedAt = Date.now();
-    await db.put("series", series);
-    clearCoverCache(series.id);
-  }
-
-  if (state.activePartId === partId){
-    if (state.parts.length){
-      const next = state.parts[Math.min(removedIndex, state.parts.length-1)];
-      state.activePartId = next?.id || null;
-    } else {
-      state.activePartId = null;
-    }
-    if (state.activeSeriesId){
-      if (state.activePartId){
-        localStorage.setItem("ct_last_part_"+state.activeSeriesId, state.activePartId);
-      } else {
-        localStorage.removeItem("ct_last_part_"+state.activeSeriesId);
-      }
-    }
-  }
-
-  updatePartsUIVisibility();
-  updateDropzoneVisibility();
-  await touchSeriesUpdated();
-  renderPartSelect();
-  renderPartFilter();
-  await loadActivePartImage();
   refreshStatsAndRender();
-  resizeCanvasAndRedraw();
+  drawViewer();
 }
 
 /* ---------- Stats + list ---------- */
@@ -1025,31 +1466,30 @@ function renderStats(){
 
 function filterCards(cards){
   let out = cards;
-  if (state.partFilter !== "all") out = out.filter(c=>c.partId===state.partFilter);
   if (state.statusFilter === "trade") out = out.filter(c=>c.foundTrade);
   else if (state.statusFilter === "received") out = out.filter(c=>c.received);
   else if (state.statusFilter === "pending") out = out.filter(c=>c.foundTrade && !c.received);
-  else if (state.statusFilter === "notfound") out = out.filter(c=>!c.foundTrade && !c.received);
+  else if (state.statusFilter === "missing" || state.statusFilter === "notfound") out = out.filter(c=>!c.foundTrade && !c.received);
   return out;
 }
 
 function cardLabel(idx){ return `Открытка ${String(idx+1).padStart(2,"0")}`; }
 
-async function ensurePartImagesCache(){
-  state.imageByPart = new Map();
-  for (const p of state.parts){
-    if (!p.imageBlob) continue;
-    const url = URL.createObjectURL(p.imageBlob);
+async function ensureImageCache(){
+  state.imageById = new Map();
+  for (const image of state.images){
+    if (!image.imageBlob) continue;
+    const url = URL.createObjectURL(image.imageBlob);
     const img = new Image();
     img.src = url;
     await img.decode().catch(()=>{});
     URL.revokeObjectURL(url);
-    state.imageByPart.set(p.id, img);
+    state.imageById.set(image.id, img);
   }
 }
 
 function miniPreviewDataURL(card){
-  const img = state.imageByPart.get(card.partId);
+  const img = state.imageById.get(card.imageId);
   if (!img) {
     return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="140" height="100">
       <rect width="140" height="100" rx="14" fill="rgba(255,255,255,0.06)"/>
@@ -1076,7 +1516,7 @@ function miniPreviewDataURL(card){
 }
 
 async function renderCardsList(){
-  await ensurePartImagesCache();
+  await ensureImageCache();
   const visible = filterCards(state.cards);
   els.cardsList.innerHTML = "";
 
@@ -1145,11 +1585,7 @@ async function renderCardsList(){
         await touchSeriesUpdated();
       }, 250);
     });
-    const parttag = document.createElement("div");
-    parttag.className = "parttag";
-    const part = state.parts.find(p=>p.id===c.partId);
-    parttag.textContent = part ? `Часть ${part.index}` : "Часть —";
-    row1.append(label, parttag);
+    row1.append(label);
 
     const checks = document.createElement("div");
     checks.className = "checks";
@@ -1232,17 +1668,29 @@ async function renderCardsList(){
     meta.append(row1, checks, noteWrap, actions);
     wrap.append(mini, meta);
 
-    wrap.addEventListener("mouseenter", () => { state.listHoverCardId = c.id; draw(); });
-    wrap.addEventListener("mouseleave", () => { state.listHoverCardId = null; draw(); });
+    wrap.addEventListener("mouseenter", () => {
+      state.listHoverCardId = c.id;
+      drawAllImageBlocks();
+      if (state.imageViewer?.open) drawViewer();
+    });
+    wrap.addEventListener("mouseleave", () => {
+      state.listHoverCardId = null;
+      drawAllImageBlocks();
+      if (state.imageViewer?.open) drawViewer();
+    });
 
     els.cardsList.appendChild(wrap);
   });
 }
 
 async function showCardOnCanvas(card){
-  await setActivePart(card.partId);
-  els.canvas.scrollIntoView({behavior:"smooth", block:"center"});
+  const block = state.imageBlocks.get(card.imageId);
+  if (block?.blockEl){
+    block.blockEl.scrollIntoView({behavior:"smooth", block:"center"});
+  }
+  state.selectedCardId = card.id;
   startFocusPulse(card.id);
+  drawAllImageBlocks();
 }
 
 function startFocusPulse(cardId){
@@ -1257,10 +1705,12 @@ function startFocusPulse(cardId){
       state.focusCardId = null;
       state.focusUntil = 0;
       state.focusAnimationId = null;
-      draw();
+      drawAllImageBlocks();
+      if (state.imageViewer?.open) drawViewer();
       return;
     }
-    draw();
+    drawAllImageBlocks();
+    if (state.imageViewer?.open) drawViewer();
     state.focusAnimationId = requestAnimationFrame(tick);
   };
   state.focusAnimationId = requestAnimationFrame(tick);
@@ -1278,9 +1728,9 @@ async function touchSeriesUpdated(){
 
 function refreshStatsAndRender(){
   renderStats();
-  renderPartFilter();
   renderCardsList();
-  draw();
+  drawAllImageBlocks();
+  if (state.imageViewer?.open) drawViewer();
   updateMasterCheckboxes();
 }
 
@@ -1292,20 +1742,6 @@ function applyFoundTrade(card, value){
 function applyReceived(card, value){
   card.received = value;
   if (value) card.foundTrade = true;
-}
-
-async function setActivePart(partId){
-  if (!partId || partId === state.activePartId) return;
-  state.activePartId = partId;
-  state.selectedCardId = null;
-  state.hoverCardId = null;
-  state.listHoverCardId = null;
-  localStorage.setItem("ct_last_part_"+state.activeSeriesId, partId);
-  renderPartSelect();
-  await loadActivePartImage();
-  resizeCanvasAndRedraw();
-  draw();
-  updateMasterCheckboxes();
 }
 
 function highlightCardInList(cardId){
@@ -1324,21 +1760,14 @@ async function focusCardInList(card){
     setStatusFilter("all");
     needsRender = true;
   }
-  if (state.partFilter !== "all"){
-    state.partFilter = "all";
-    needsRender = true;
-  }
-  if (needsRender){
-    renderPartFilter();
-  }
+  if (needsRender) {}
   await renderCardsList();
   requestAnimationFrame(() => highlightCardInList(card.id));
 }
 
 function updateMasterCheckboxes(){
-  const partCards = state.activePartId ? state.cards.filter(c=>c.partId===state.activePartId) : [];
   if (!els.masterTrade || !els.masterReceived) return;
-  if (!partCards.length){
+  if (!state.cards.length){
     els.masterTrade.checked = false;
     els.masterTrade.indeterminate = false;
     els.masterTrade.disabled = true;
@@ -1347,21 +1776,19 @@ function updateMasterCheckboxes(){
     els.masterReceived.disabled = true;
     return;
   }
-  const tradeCount = partCards.filter(c=>c.foundTrade).length;
-  const receivedCount = partCards.filter(c=>c.received).length;
+  const tradeCount = state.cards.filter(c=>c.foundTrade).length;
+  const receivedCount = state.cards.filter(c=>c.received).length;
   els.masterTrade.disabled = false;
   els.masterReceived.disabled = false;
-  els.masterTrade.checked = tradeCount === partCards.length;
-  els.masterTrade.indeterminate = tradeCount > 0 && tradeCount < partCards.length;
-  els.masterReceived.checked = receivedCount === partCards.length;
-  els.masterReceived.indeterminate = receivedCount > 0 && receivedCount < partCards.length;
+  els.masterTrade.checked = tradeCount === state.cards.length;
+  els.masterTrade.indeterminate = tradeCount > 0 && tradeCount < state.cards.length;
+  els.masterReceived.checked = receivedCount === state.cards.length;
+  els.masterReceived.indeterminate = receivedCount > 0 && receivedCount < state.cards.length;
 }
 
 async function setAllFoundTrade(value){
-  if (!state.activePartId) return;
-  const partCards = state.cards.filter(c=>c.partId===state.activePartId);
-  if (!partCards.length) return;
-  for (const c of partCards){
+  if (!state.cards.length) return;
+  for (const c of state.cards){
     applyFoundTrade(c, value);
     c.updatedAt = Date.now();
     await db.put("cards", c);
@@ -1371,10 +1798,8 @@ async function setAllFoundTrade(value){
 }
 
 async function setAllReceived(value){
-  if (!state.activePartId) return;
-  const partCards = state.cards.filter(c=>c.partId===state.activePartId);
-  if (!partCards.length) return;
-  for (const c of partCards){
+  if (!state.cards.length) return;
+  for (const c of state.cards){
     applyReceived(c, value);
     c.updatedAt = Date.now();
     await db.put("cards", c);
@@ -1413,17 +1838,17 @@ async function deleteSeriesById(id){
 
   const cards = await db.getAllByIndex("cards","seriesId", id);
   for (const c of cards) await db.delete("cards", c.id);
-  const parts = await db.getAllByIndex("parts","seriesId", id);
-  for (const p of parts) await db.delete("parts", p.id);
+  const images = await db.getAllByIndex("images","seriesId", id);
+  for (const img of images) await db.delete("images", img.id);
   await db.delete("series", id);
   clearCoverCache(id);
 
   state.series = state.series.filter(x=>x.id!==id);
   if (state.activeSeriesId === id){
-    state.parts = [];
+    state.images = [];
     state.cards = [];
     state.activeSeriesId = null;
-    state.activePartId = null;
+    state.activeImageId = null;
     localStorage.removeItem("ct_last_series");
     showHome();
   }
@@ -1466,19 +1891,19 @@ function dataURLToBlob(dataURL){
 
 async function exportData(){
   const series = await db.getAll("series");
-  const parts = await db.getAll("parts");
+  const images = await db.getAll("images");
   const cards = await db.getAll("cards");
 
-  const partsPortable = [];
-  for (const p of parts){
-    const copy = {...p};
+  const imagesPortable = [];
+  for (const image of images){
+    const copy = {...image};
     if (copy.imageBlob){
       copy.imageBase64 = await blobToDataURL(copy.imageBlob);
       delete copy.imageBlob;
     }
-    partsPortable.push(copy);
+    imagesPortable.push(copy);
   }
-  const payload = { version: 4, exportedAt: new Date().toISOString(), series, parts: partsPortable, cards };
+  const payload = { version: 5, exportedAt: new Date().toISOString(), series, images: imagesPortable, cards };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1491,7 +1916,7 @@ async function exportData(){
 
 async function importData(file){
   const data = JSON.parse(await file.text());
-  if (!data || !Array.isArray(data.series) || !Array.isArray(data.parts) || !Array.isArray(data.cards)){
+  if (!data || !Array.isArray(data.series) || !Array.isArray(data.cards)){
     alert("Файл не похож на экспорт Collection Tracker.");
     return;
   }
@@ -1499,31 +1924,40 @@ async function importData(file){
   if (!ok) return;
 
   await db.clear("cards");
-  await db.clear("parts");
+  await db.clear("images");
   await db.clear("series");
 
-  for (const s of data.series) await db.put("series", s);
-  for (const p of data.parts){
-    const copy = {...p};
+  for (const s of data.series){
+    const copy = {...s};
+    if (copy.coverPartId && !copy.coverImageId){
+      copy.coverImageId = copy.coverPartId;
+    }
+    if (copy.coverPartId !== undefined) delete copy.coverPartId;
+    await db.put("series", copy);
+  }
+  const incomingImages = Array.isArray(data.images) ? data.images : (Array.isArray(data.parts) ? data.parts : []);
+  for (const img of incomingImages){
+    const copy = {...img};
     if (copy.imageBase64){
       copy.imageBlob = dataURLToBlob(copy.imageBase64);
       delete copy.imageBase64;
     }
-    await db.put("parts", copy);
+    if (copy.id){
+      await db.put("images", copy);
+    }
   }
   for (const c of data.cards){
     if (c.note === undefined) c.note = "";
     if (c.thumbZoom === undefined) c.thumbZoom = 1;
+    if (!c.imageId && c.partId) c.imageId = c.partId;
+    if (c.partId !== undefined) delete c.partId;
     await db.put("cards", c);
   }
   await loadAll();
 }
 
-/* ---------- Canvas ---------- */
-const canvas = els.canvas;
-const ctx = canvas.getContext("2d");
-
-if (!ctx.roundRect){
+/* ---------- Canvas utilities ---------- */
+if (!CanvasRenderingContext2D.prototype.roundRect){
   CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){
     const rr = Math.min(r, w/2, h/2);
     this.beginPath();
@@ -1539,251 +1973,11 @@ if (!ctx.roundRect){
 
 function devicePx(n){ return Math.round(n * devicePixelRatio); }
 
-function computeImageScale(){
-  if (!state.image){ state.imageScale = 1; return; }
-  const sx = canvas.width / state.image.width;
-  const sy = canvas.height / state.image.height;
-  state.imageScale = Math.min(sx, sy);
-}
-function imageDrawRect(){
-  if (!state.image) return {dx:0, dy:0, dw: canvas.width, dh: canvas.height};
-  const dw = Math.floor(state.image.width * state.imageScale);
-  const dh = Math.floor(state.image.height * state.imageScale);
-  const dx = Math.floor((canvas.width - dw) / 2);
-  const dy = Math.floor((canvas.height - dh) / 2);
-  return {dx, dy, dw, dh};
-}
-function isPointInsideImage(cx, cy){
-  if (!state.image) return false;
-  const {dx,dy,dw,dh} = imageDrawRect();
-  return cx>=dx && cx<=dx+dw && cy>=dy && cy<=dy+dh;
-}
-function pointerPos(evt){
-  const rect = canvas.getBoundingClientRect();
-  return {
-    x: (evt.clientX - rect.left) * devicePixelRatio,
-    y: (evt.clientY - rect.top) * devicePixelRatio
-  };
-}
-function canvasToImageCoords(cx, cy){
-  const {dx,dy} = imageDrawRect();
-  const x = (cx - dx) / state.imageScale;
-  const y = (cy - dy) / state.imageScale;
-  return { x: clamp(x,0,state.image.width), y: clamp(y,0,state.image.height) };
-}
-function imageToCanvasCoords(ix, iy){
-  const {dx,dy} = imageDrawRect();
-  return { cx: dx + ix*state.imageScale, cy: dy + iy*state.imageScale };
-}
-
-function findCardAtPoint(ix, iy){
-  const partCards = state.cards.filter(c=>c.partId===state.activePartId);
-  let best = null;
-  let bestArea = Infinity;
-  for (const c of partCards){
-    if (ix < c.x || ix > c.x + c.w || iy < c.y || iy > c.y + c.h) continue;
-    const area = Math.max(1, c.w) * Math.max(1, c.h);
-    if (area < bestArea){
-      bestArea = area;
-      best = c;
-    }
-  }
-  return best;
-}
-
-function resizeCanvasAndRedraw(){
-  const parent = canvas.parentElement;
-  if (!parent) return;
-  const cssW = parent.clientWidth;
-  const cssH = Math.min(Math.max(420, window.innerHeight - 260), 700);
-
-  canvas.style.width = cssW + "px";
-  canvas.style.height = cssH + "px";
-  canvas.width = devicePx(cssW);
-  canvas.height = devicePx(cssH);
-
-  computeImageScale();
-  draw();
-}
-
-function draw(){
-  ctx.clearRect(0,0,canvas.width, canvas.height);
-
-  if (!state.image){
-    ctx.save();
-    ctx.fillStyle = "rgba(255,255,255,0.05)";
-    ctx.fillRect(0,0,canvas.width, canvas.height);
-    ctx.fillStyle = "rgba(255,255,255,0.75)";
-    ctx.font = `${Math.floor(16*devicePixelRatio)}px system-ui`;
-    const msg = state.parts.length ? "Выбери часть и загрузи изображение, чтобы выделять открытки." : "Нажми “＋ Добавить изображение”, чтобы начать (Часть 1).";
-    ctx.fillText(msg, devicePx(18), devicePx(28));
-    ctx.restore();
-    return;
-  }
-
-  const r = imageDrawRect();
-  ctx.save();
-  ctx.globalAlpha = 0.96;
-  ctx.drawImage(state.image, r.dx, r.dy, r.dw, r.dh);
-  ctx.restore();
-
-  ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.25)";
-  ctx.fillRect(0,0,canvas.width, r.dy);
-  ctx.fillRect(0, r.dy+r.dh, canvas.width, canvas.height-(r.dy+r.dh));
-  ctx.fillRect(0, r.dy, r.dx, r.dh);
-  ctx.fillRect(r.dx+r.dw, r.dy, canvas.width-(r.dx+r.dw), r.dh);
-  ctx.restore();
-
-  const partCards = state.cards.filter(c=>c.partId===state.activePartId);
-  const focusActive = state.focusCardId && state.focusUntil && (Date.now() < state.focusUntil);
-  const visibleIds = new Set();
-  if (state.hoverCardId) visibleIds.add(state.hoverCardId);
-  if (state.listHoverCardId) visibleIds.add(state.listHoverCardId);
-  if (state.selectedCardId) visibleIds.add(state.selectedCardId);
-  if (focusActive && state.focusCardId) visibleIds.add(state.focusCardId);
-
-  for (const c of partCards){
-    if (!visibleIds.has(c.id)) continue;
-    const {cx:x1, cy:y1} = imageToCanvasCoords(c.x, c.y);
-    const {cx:x2, cy:y2} = imageToCanvasCoords(c.x+c.w, c.y+c.h);
-    const rr = rectNormalize(x1,y1,x2,y2);
-
-    const isFocus = focusActive && c.id === state.focusCardId;
-    const isHi = isFocus || state.hoverCardId===c.id || state.listHoverCardId===c.id || state.selectedCardId===c.id;
-    const isReceived = !!c.received;
-    const isTrade = !!c.foundTrade;
-
-    ctx.save();
-    let pulseBoost = 1;
-    if (isFocus){
-      const progress = clamp((Date.now() - state.focusStart) / Math.max(1, state.focusUntil - state.focusStart), 0, 1);
-      pulseBoost = 0.9 + Math.sin(progress * Math.PI) * 0.5;
-    }
-    ctx.lineWidth = devicePx(isHi ? (2.2 * pulseBoost) : 1.6);
-    ctx.globalAlpha = isFocus ? 0.95 : 0.85;
-
-    ctx.strokeStyle = isReceived ? "rgba(34,197,94,0.95)"
-                  : isTrade ? "rgba(245,158,11,0.95)"
-                  : "rgba(167,139,250,0.95)";
-    ctx.fillStyle = isReceived ? "rgba(34,197,94,0.12)"
-                 : isTrade ? "rgba(245,158,11,0.10)"
-                 : "rgba(167,139,250,0.10)";
-    ctx.beginPath();
-    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (state.drag.active){
-    const rr = rectNormalize(state.drag.startX, state.drag.startY, state.drag.curX, state.drag.curY);
-    ctx.save();
-    ctx.lineWidth = devicePx(2);
-    ctx.strokeStyle = "rgba(255,255,255,0.95)";
-    ctx.setLineDash([devicePx(8), devicePx(6)]);
-    ctx.fillStyle = "rgba(255,255,255,0.10)";
-    ctx.beginPath();
-    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-}
-
-async function onPointerDown(evt){
-  if (!state.image || !state.activePartId) return;
-  canvas.setPointerCapture(evt.pointerId);
-  const {x,y} = pointerPos(evt);
-  if (!isPointInsideImage(x,y)) return;
-  state.drag.active = true;
-  state.hoverCardId = null;
-  state.drag.startX = x; state.drag.startY = y;
-  state.drag.curX = x; state.drag.curY = y;
-  draw();
-}
-function onPointerMove(evt){
-  const {x,y} = pointerPos(evt);
-  if (state.drag.active){
-    state.drag.curX = x; state.drag.curY = y;
-    draw();
-    return;
-  }
-  if (!state.image) return;
-  if (!isPointInsideImage(x,y)){
-    if (state.hoverCardId){
-      state.hoverCardId = null;
-      draw();
-    }
-    return;
-  }
-  const {x:ix, y:iy} = canvasToImageCoords(x, y);
-  const hit = findCardAtPoint(ix, iy);
-  const nextId = hit ? hit.id : null;
-  if (nextId !== state.hoverCardId){
-    state.hoverCardId = nextId;
-    draw();
-  }
-}
-async function onPointerUp(evt){
-  if (!state.drag.active) return;
-  state.drag.active = false;
-
-  const rr = rectNormalize(state.drag.startX, state.drag.startY, state.drag.curX, state.drag.curY);
-  if (!rectValid(rr)){
-    if (evt){
-      const {x, y} = canvasToImageCoords(state.drag.curX, state.drag.curY);
-      const hit = findCardAtPoint(x, y);
-      if (hit){
-        await setActivePart(hit.partId);
-        await focusCardInList(hit);
-        state.selectedCardId = hit.id;
-        draw();
-        return;
-      }
-    }
-    state.selectedCardId = null;
-    draw();
-    return;
-  }
-
-  const p1 = canvasToImageCoords(rr.x, rr.y);
-  const p2 = canvasToImageCoords(rr.x+rr.w, rr.y+rr.h);
-  const ir = rectNormalize(p1.x, p1.y, p2.x, p2.y);
-
-  const existing = state.cards.filter(c=>c.partId===state.activePartId);
-  if (bestOverlap(ir, existing) > 0.82){ draw(); return; }
-
-  const card = {
-    id: uid("card"),
-    seriesId: state.activeSeriesId,
-    partId: state.activePartId,
-    x: Math.round(ir.x),
-    y: Math.round(ir.y),
-    w: Math.round(ir.w),
-    h: Math.round(ir.h),
-    foundTrade: false,
-    received: false,
-    title: "",
-    note: "",
-    thumbPos: {x:50, y:50},
-    thumbZoom: 1,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-
-  await db.put("cards", card);
-  state.cards.push(card);
-  await touchSeriesUpdated();
-  refreshStatsAndRender();
-}
-
-async function undoLastInActivePart(){
-  if (!state.activePartId) return;
-  const partCards = state.cards.filter(c=>c.partId===state.activePartId).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
-  if (!partCards.length) return;
-  const last = partCards[partCards.length-1];
-  const ok = await confirmDialog("Убрать последнее выделение?", "Удалить последнюю добавленную открытку в текущей части?", "Удалить");
+async function undoLastSelection(){
+  if (!state.cards.length) return;
+  const ordered = state.cards.slice().sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+  const last = ordered[ordered.length-1];
+  const ok = await confirmDialog("Убрать последнее выделение?", "Удалить последнюю добавленную открытку в коллекции?", "Удалить");
   if (!ok) return;
   await db.delete("cards", last.id);
   state.cards = state.cards.filter(x=>x.id!==last.id);
@@ -1839,8 +2033,8 @@ async function openThumbEditor(card){
 async function openCoverEditor(seriesId){
   const series = state.series.find(s => s.id === seriesId);
   if (!series) return;
-  const { blob, pos, zoom, partId } = await getSeriesCover(seriesId);
-  if (!blob || !partId) return;
+  const { blob, pos, zoom, imageId } = await getSeriesCover(seriesId);
+  if (!blob || !imageId) return;
   const thumbEl = document.querySelector(`.home-card[data-id="${seriesId}"] .home-thumb`);
   if (thumbEl){
     const rect = thumbEl.getBoundingClientRect();
@@ -1859,7 +2053,7 @@ async function openCoverEditor(seriesId){
   await img.decode().catch(()=>{});
   state.coverEdit = {
     series,
-    partId,
+    imageId,
     pos: {...pos},
     zoom: clampZoom(zoom ?? 1),
     imgW: img.width || 1,
@@ -1899,9 +2093,9 @@ function updateCropPositionFromDrag(editState, frameEl, imgEl, deltaX, deltaY){
 async function refreshSeriesCover(seriesId){
   const series = state.series.find(s => s.id === seriesId);
   if (!series) return;
-  const parts = (await db.getAllByIndex("parts", "seriesId", seriesId)).sort((a,b)=>a.index-b.index);
-  if (!parts.length) return;
-  series.coverPartId = parts[0].id;
+  const images = (await db.getAllByIndex("images", "seriesId", seriesId)).sort((a,b)=>a.index-b.index);
+  if (!images.length) return;
+  series.coverImageId = images[0].id;
   series.coverPos = {x:50, y:50};
   series.coverZoom = 1;
   series.updatedAt = Date.now();
@@ -1966,19 +2160,6 @@ function initEvents(){
     applyHomeSortSetting(state.homeSortKey, next);
   });
 
-  els.partSelect.addEventListener("change", async () => {
-    const id = els.partSelect.value;
-    if (!id || id === state.activePartId) return;
-    await setActivePart(id);
-  });
-
-  els.partFilter.addEventListener("change", async () => {
-    const id = els.partFilter.value;
-    if (!id || id === state.partFilter) return;
-    state.partFilter = id;
-    await renderCardsList();
-  });
-
   $$(".chip").forEach(ch => {
     ch.addEventListener("click", async () => {
       setStatusFilter(ch.dataset.filter);
@@ -1988,19 +2169,14 @@ function initEvents(){
 
   els.fileImage.addEventListener("change", async () => {
     if (!els.fileImage.files?.length) return;
-    await addPartsFromFiles(els.fileImage.files);
+    await addImagesFromFiles(els.fileImage.files);
     els.fileImage.value = "";
   });
   els.dropzone.addEventListener("click", () => {
-    if (state.parts.length !== 0) return;
     els.fileImage.click();
   });
 
-  els.btnUndo.addEventListener("click", undoLastInActivePart);
-  els.btnDeletePart.addEventListener("click", async () => {
-    if (!state.activePartId) return;
-    await deletePart(state.activePartId);
-  });
+  els.btnUndo.addEventListener("click", undoLastSelection);
   els.btnDeleteSeries.addEventListener("click", deleteActiveSeries);
 
   els.masterTrade.addEventListener("change", () => {
@@ -2118,7 +2294,7 @@ function initEvents(){
     if (els.dlgCoverPos.returnValue === "ok"){
       state.coverEdit.series.coverPos = {...state.coverEdit.pos};
       state.coverEdit.series.coverZoom = clampZoom(state.coverEdit.zoom || 1);
-      state.coverEdit.series.coverPartId = state.coverEdit.partId;
+      state.coverEdit.series.coverImageId = state.coverEdit.imageId;
       state.coverEdit.series.updatedAt = Date.now();
       await db.put("series", state.coverEdit.series);
       const cached = state.coverCache.get(state.coverEdit.series.id);
@@ -2127,7 +2303,7 @@ function initEvents(){
           ...cached,
           pos: {...state.coverEdit.pos},
           zoom: clampZoom(state.coverEdit.zoom || 1),
-          partId: state.coverEdit.partId,
+          imageId: state.coverEdit.imageId,
         });
       }
       state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
@@ -2140,27 +2316,20 @@ function initEvents(){
     state.coverEdit = null;
   });
 
-  canvas.addEventListener("pointerdown", onPointerDown);
-  canvas.addEventListener("pointermove", onPointerMove);
-  canvas.addEventListener("pointerup", onPointerUp);
-  canvas.addEventListener("pointercancel", onPointerUp);
-  canvas.addEventListener("pointerleave", () => {
-    if (state.hoverCardId){
-      state.hoverCardId = null;
-      draw();
+  window.addEventListener("resize", () => {
+    resizeAllImageBlocks();
+    if (state.imageViewer?.open){
+      resizeViewerCanvas();
+      drawViewer();
     }
   });
-
-  window.addEventListener("resize", () => resizeCanvasAndRedraw());
 
   let dragDepth = 0;
   const handleDragEnter = (evt) => {
     if (!evt.dataTransfer?.types?.includes("Files")) return;
     evt.preventDefault();
     dragDepth += 1;
-    if (state.parts.length === 0){
-      els.seriesLeftcol.classList.add("is-dragover");
-    }
+    els.seriesLeftcol.classList.add("is-dragover");
   };
   const handleDragLeave = (evt) => {
     if (!evt.dataTransfer?.types?.includes("Files")) return;
@@ -2179,7 +2348,7 @@ function initEvents(){
     evt.preventDefault();
     dragDepth = 0;
     els.seriesLeftcol.classList.remove("is-dragover");
-    await addPartsFromFiles(evt.dataTransfer.files);
+    await addImagesFromFiles(evt.dataTransfer.files);
   };
   els.seriesView.addEventListener("dragenter", handleDragEnter);
   els.seriesView.addEventListener("dragleave", handleDragLeave);
