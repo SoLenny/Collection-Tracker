@@ -1,4 +1,4 @@
-const VERSION = "v4.1.5";
+const VERSION = "v4.1.6";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -162,12 +162,20 @@ const els = {
   thumbImage: $("#thumbImage"),
   thumbSave: $("#thumbSave"),
   thumbReset: $("#thumbReset"),
+  thumbZoom: $("#thumbZoom"),
+  thumbZoomIn: $("#thumbZoomIn"),
+  thumbZoomOut: $("#thumbZoomOut"),
+  thumbZoomValue: $("#thumbZoomValue"),
 
   dlgCoverPos: $("#dlgCoverPos"),
   coverFrame: $("#coverFrame"),
   coverImage: $("#coverImage"),
   coverSave: $("#coverSave"),
   coverReset: $("#coverReset"),
+  coverZoom: $("#coverZoom"),
+  coverZoomIn: $("#coverZoomIn"),
+  coverZoomOut: $("#coverZoomOut"),
+  coverZoomValue: $("#coverZoomValue"),
 
   canvas: $("#canvas"),
 };
@@ -188,12 +196,20 @@ let state = {
   image: null,
   imageURL: null,
   imageScale: 1,
-  highlightCardId: null,
+  hoverCardId: null,
+  listHoverCardId: null,
+  selectedCardId: null,
+  imageViewer: null,
+  viewerImage: null,
+  openImageButton: null,
   focusCardId: null,
   focusUntil: 0,
+  focusStart: 0,
+  focusAnimationId: null,
 
   drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
   imageByPart: new Map(),
+  coverCache: new Map(),
   thumbEdit: null,
   coverEdit: null,
 };
@@ -223,11 +239,134 @@ function limitText(value, max){
   return value.length > max ? value.slice(0, max) : value;
 }
 
+const CROP_ZOOM_MIN = 1;
+const CROP_ZOOM_MAX = 3;
+const CROP_ZOOM_STEP = 0.05;
+
+function clampZoom(value){
+  return clamp(Number(value) || 1, CROP_ZOOM_MIN, CROP_ZOOM_MAX);
+}
+
+function waitForImageReady(img){
+  return new Promise((resolve, reject) => {
+    if (img.complete && img.naturalWidth) return resolve();
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      img.removeEventListener("load", onLoad);
+      img.removeEventListener("error", onError);
+      ok ? resolve() : reject(new Error("Image load failed"));
+    };
+    const onLoad = () => finish(true);
+    const onError = () => finish(false);
+    img.addEventListener("load", onLoad, { once: true });
+    img.addEventListener("error", onError, { once: true });
+    if (img.decode){
+      img.decode().then(() => finish(true)).catch(() => {});
+    }
+  });
+}
+
+async function loadImageFromBlob(blob){
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.decoding = "async";
+  img.src = url;
+  await waitForImageReady(img).catch(() => {});
+  return { img, url };
+}
+
+function getCropMetrics(imgW, imgH, frameW, frameH, zoom){
+  const baseScale = Math.max(frameW / imgW, frameH / imgH);
+  const scale = baseScale * zoom;
+  const scaledW = imgW * scale;
+  const scaledH = imgH * scale;
+  const overflowX = Math.max(0, scaledW - frameW);
+  const overflowY = Math.max(0, scaledH - frameH);
+  return { scaledW, scaledH, overflowX, overflowY };
+}
+
+function clampCropPosition(pos, overflowX, overflowY){
+  return {
+    x: overflowX ? clamp(Number(pos?.x) || 50, 0, 100) : 50,
+    y: overflowY ? clamp(Number(pos?.y) || 50, 0, 100) : 50,
+  };
+}
+
+function applyCropToImage(editState, frameEl, imgEl){
+  if (!editState || !frameEl || !imgEl) return;
+  const rect = frameEl.getBoundingClientRect();
+  const frameW = rect.width || 1;
+  const frameH = rect.height || 1;
+  const imgW = editState.imgW || imgEl.naturalWidth || imgEl.width || 1;
+  const imgH = editState.imgH || imgEl.naturalHeight || imgEl.height || 1;
+  editState.zoom = clampZoom(editState.zoom || 1);
+  const { scaledW, scaledH, overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, editState.zoom);
+  editState.pos = clampCropPosition(editState.pos || {x:50, y:50}, overflowX, overflowY);
+  const offsetX = overflowX ? (editState.pos.x / 100) * overflowX : 0;
+  const offsetY = overflowY ? (editState.pos.y / 100) * overflowY : 0;
+  imgEl.style.width = `${scaledW}px`;
+  imgEl.style.height = `${scaledH}px`;
+  imgEl.style.left = `${-offsetX}px`;
+  imgEl.style.top = `${-offsetY}px`;
+}
+
+function applyCropPreview(imgEl, frameEl, pos, zoom){
+  if (!imgEl || !frameEl) return;
+  const apply = () => {
+    const rect = frameEl.getBoundingClientRect();
+    const frameW = rect.width || 1;
+    const frameH = rect.height || 1;
+    if (frameW <= 1 || frameH <= 1){
+      requestAnimationFrame(apply);
+      return;
+    }
+    const imgW = imgEl.naturalWidth || imgEl.width || 1;
+    const imgH = imgEl.naturalHeight || imgEl.height || 1;
+    const safeZoom = clampZoom(zoom || 1);
+    const { scaledW, scaledH, overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, safeZoom);
+    const nextPos = clampCropPosition(pos || {x:50, y:50}, overflowX, overflowY);
+    const offsetX = overflowX ? (nextPos.x / 100) * overflowX : 0;
+    const offsetY = overflowY ? (nextPos.y / 100) * overflowY : 0;
+    imgEl.style.width = `${scaledW}px`;
+    imgEl.style.height = `${scaledH}px`;
+    imgEl.style.left = `${-offsetX}px`;
+    imgEl.style.top = `${-offsetY}px`;
+  };
+  if (imgEl.complete) {
+    apply();
+  } else {
+    imgEl.addEventListener("load", apply, { once: true });
+  }
+}
+
+function updateZoomUI(editState, zoomInput, zoomValue){
+  if (!editState || !zoomInput) return;
+  const zoom = clampZoom(editState.zoom || 1);
+  zoomInput.value = String(zoom);
+  if (zoomValue){
+    zoomValue.textContent = `${Math.round(zoom * 100)}%`;
+  }
+}
+
+function setCropZoom(editState, frameEl, imgEl, zoomInput, zoomValue, nextZoom){
+  if (!editState) return;
+  editState.zoom = clampZoom(nextZoom);
+  applyCropToImage(editState, frameEl, imgEl);
+  updateZoomUI(editState, zoomInput, zoomValue);
+}
+
+function nudgeCropZoom(editState, frameEl, imgEl, zoomInput, zoomValue, delta){
+  if (!editState) return;
+  setCropZoom(editState, frameEl, imgEl, zoomInput, zoomValue, (editState.zoom || 1) + delta);
+}
+
 function humanStats(cards){
   const total = cards.length;
   const trade = cards.filter(c => c.foundTrade).length;
   const received = cards.filter(c => c.received).length;
-  const pending = total - received;
+  const pending = cards.filter(c => c.foundTrade && !c.received).length;
   return { total, trade, received, pending };
 }
 function computeProgress(cards){
@@ -324,7 +463,15 @@ function renderSeriesList(){
 
     const thumb = document.createElement("div");
     thumb.className = "thumb";
-    thumb.innerHTML = `<div style="font-weight:900;color:rgba(255,255,255,0.65)">✦</div>`;
+    const cachedCover = state.coverCache.get(s.id);
+    if (cachedCover?.url){
+      const img = new Image();
+      img.src = cachedCover.url;
+      thumb.appendChild(img);
+      applyCropPreview(img, thumb, cachedCover.pos, cachedCover.zoom);
+    } else {
+      thumb.innerHTML = `<div style="font-weight:900;color:rgba(255,255,255,0.65)">✦</div>`;
+    }
 
     const info = document.createElement("div");
     info.className = "series-info";
@@ -361,15 +508,24 @@ function renderSeriesList(){
 
     // Async: thumbnail
     (async () => {
-      const { blob, pos } = await getSeriesCover(s.id);
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
+      const cover = await getSeriesCover(s.id);
+      if (!cover.blob) return;
+      const cached = state.coverCache.get(s.id);
+      const needsUrl = !cached || cached.partId !== cover.partId;
+      if (needsUrl){
+        setCoverCache(s.id, cover);
+      } else if (!cached){
+        setCoverCache(s.id, cover);
+      } else if (cached.pos.x !== cover.pos.x || cached.pos.y !== cover.pos.y || cached.zoom !== cover.zoom){
+        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, partId: cover.partId });
+      }
+      const url = state.coverCache.get(s.id)?.url;
+      if (!url) return;
       const img = new Image();
       img.src = url;
-      img.onload = () => URL.revokeObjectURL(url);
-      img.style.objectPosition = `${pos.x}% ${pos.y}%`;
       thumb.innerHTML = "";
       thumb.appendChild(img);
+      applyCropPreview(img, thumb, cover.pos, cover.zoom);
     })();
 
     // Async: progress text (received/total)
@@ -391,16 +547,33 @@ async function getSeriesCover(seriesId){
   const series = state.series.find(s => s.id === seriesId);
   const parts = (await db.getAllByIndex("parts","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
   if (!parts.length){
-    return { blob: null, pos: {x:50, y:50}, partId: null };
+    return { blob: null, pos: {x:50, y:50}, zoom: 1, partId: null };
   }
   const coverPartId = series?.coverPartId;
   const part = parts.find(p => p.id === coverPartId) || parts[0];
   const rawPos = series?.coverPos || {x:50, y:50};
+  const rawZoom = series?.coverZoom ?? 1;
   const pos = {
     x: clamp(Number(rawPos.x) || 50, 0, 100),
     y: clamp(Number(rawPos.y) || 50, 0, 100),
   };
-  return { blob: part?.imageBlob || null, pos, partId: part?.id || null };
+  const zoom = clampZoom(rawZoom);
+  return { blob: part?.imageBlob || null, pos, zoom, partId: part?.id || null };
+}
+
+function clearCoverCache(seriesId){
+  const cached = state.coverCache.get(seriesId);
+  if (cached?.url) URL.revokeObjectURL(cached.url);
+  state.coverCache.delete(seriesId);
+}
+
+function setCoverCache(seriesId, cover){
+  const cached = state.coverCache.get(seriesId);
+  if (cached?.url) URL.revokeObjectURL(cached.url);
+  if (!cover?.blob) return null;
+  const url = URL.createObjectURL(cover.blob);
+  state.coverCache.set(seriesId, { url, pos: cover.pos, zoom: cover.zoom, partId: cover.partId });
+  return url;
 }
 
 /* ---------- Home ---------- */
@@ -495,18 +668,38 @@ async function renderHome(){
     actions.append(btnEdit, btnRefresh);
     thumb.appendChild(actions);
 
-    (async () => {
-      const { blob, pos } = await getSeriesCover(s.id);
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
+    const cachedCover = state.coverCache.get(s.id);
+    if (cachedCover?.url){
       const img = new Image();
-      img.src = url;
-      img.onload = () => URL.revokeObjectURL(url);
-      img.style.objectPosition = `${pos.x}% ${pos.y}%`;
+      img.src = cachedCover.url;
       thumb.classList.add("has-cover");
       thumb.innerHTML = "";
       thumb.appendChild(img);
       thumb.appendChild(actions);
+      applyCropPreview(img, thumb, cachedCover.pos, cachedCover.zoom);
+    }
+
+    (async () => {
+      const cover = await getSeriesCover(s.id);
+      if (!cover.blob) return;
+      const cached = state.coverCache.get(s.id);
+      const needsUrl = !cached || cached.partId !== cover.partId;
+      if (needsUrl){
+        setCoverCache(s.id, cover);
+      } else if (!cached){
+        setCoverCache(s.id, cover);
+      } else if (cached.pos.x !== cover.pos.x || cached.pos.y !== cover.pos.y || cached.zoom !== cover.zoom){
+        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, partId: cover.partId });
+      }
+      const url = state.coverCache.get(s.id)?.url;
+      if (!url) return;
+      const img = new Image();
+      img.src = url;
+      thumb.classList.add("has-cover");
+      thumb.innerHTML = "";
+      thumb.appendChild(img);
+      thumb.appendChild(actions);
+      applyCropPreview(img, thumb, cover.pos, cover.zoom);
     })();
 
     const body = document.createElement("div");
@@ -549,6 +742,9 @@ async function openSeries(seriesId){
 
   setStatusFilter("all");
   setPartFilter("all");
+  state.selectedCardId = null;
+  state.hoverCardId = null;
+  state.listHoverCardId = null;
 
   els.seriesName.value = s.name || "";
 
@@ -627,33 +823,82 @@ function updatePartsUIVisibility(){
 function updateDropzoneVisibility(){
   const empty = state.parts.length === 0;
   els.seriesLeftcol.classList.toggle("leftcol--empty", empty);
+  updateOpenImageButtonState();
+}
+
+function updateOpenImageButtonState(){
+  if (!state.openImageButton) return;
+  const canOpen = !!state.image && !!state.imageURL;
+  state.openImageButton.disabled = !canOpen;
+  state.openImageButton.classList.toggle("hidden", !canOpen);
+}
+
+function setupImageViewer(){
+  if (state.imageViewer) return;
+  const dialog = document.createElement("dialog");
+  dialog.className = "dialog image-viewer";
+  dialog.innerHTML = `
+    <div class="dialog-card dialog-image">
+      <button type="button" class="image-close" aria-label="Закрыть">×</button>
+      <img class="viewer-image" alt="Изображение серии" />
+    </div>
+  `;
+  dialog.addEventListener("click", (evt) => {
+    if (evt.target === dialog) dialog.close();
+  });
+  document.body.appendChild(dialog);
+  const closeBtn = dialog.querySelector(".image-close");
+  closeBtn.addEventListener("click", () => dialog.close());
+  state.imageViewer = dialog;
+  state.viewerImage = dialog.querySelector(".viewer-image");
+
+  const canvasWrap = document.querySelector(".canvas-wrap");
+  if (canvasWrap){
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "open-image-btn";
+    btn.title = "Открыть изображение";
+    btn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+      <path d="M4 5h16v14H4z" stroke="currentColor" stroke-width="1.6" />
+      <path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>`;
+    btn.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      if (!state.imageViewer || !state.viewerImage || !state.imageURL) return;
+      state.viewerImage.src = state.imageURL;
+      state.imageViewer.showModal();
+    });
+    canvasWrap.appendChild(btn);
+    state.openImageButton = btn;
+    updateOpenImageButtonState();
+  }
 }
 
 async function loadActivePartImage(){
-  if (state.imageURL){ URL.revokeObjectURL(state.imageURL); state.imageURL=null; }
+  if (state.imageURL){
+    URL.revokeObjectURL(state.imageURL);
+    state.imageURL = null;
+  }
   state.image = null;
+  updateOpenImageButtonState();
   if (!state.activePartId) return;
 
   const p = state.parts.find(x=>x.id===state.activePartId);
   if (!p || !p.imageBlob) return;
-  const url = URL.createObjectURL(p.imageBlob);
+  const { img, url } = await loadImageFromBlob(p.imageBlob);
   state.imageURL = url;
-  const img = new Image();
-  img.decoding = "async";
-  img.src = url;
-  await img.decode().catch(()=>{});
   state.image = img;
+  updateOpenImageButtonState();
 }
 
 async function addPartFromFile(file){
   if (!file || !state.activeSeriesId) return;
   const nextIdx = state.parts.length ? Math.max(...state.parts.map(p=>p.index)) + 1 : 1;
 
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.src = url;
-  await img.decode().catch(()=>{});
-  const w = img.width, h = img.height;
+  const { img, url } = await loadImageFromBlob(file);
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
   URL.revokeObjectURL(url);
 
   const part = {
@@ -679,6 +924,7 @@ async function addPartFromFile(file){
   if (series && !series.coverPartId){
     series.coverPartId = part.id;
     series.coverPos = {x:50, y:50};
+    series.coverZoom = 1;
     series.updatedAt = Date.now();
     await db.put("series", series);
   }
@@ -736,8 +982,10 @@ async function deletePart(partId){
   if (series && series.coverPartId === partId){
     series.coverPartId = state.parts[0]?.id || null;
     series.coverPos = {x:50, y:50};
+    series.coverZoom = 1;
     series.updatedAt = Date.now();
     await db.put("series", series);
+    clearCoverCache(series.id);
   }
 
   if (state.activePartId === partId){
@@ -777,7 +1025,8 @@ function filterCards(cards){
   if (state.partFilter !== "all") out = out.filter(c=>c.partId===state.partFilter);
   if (state.statusFilter === "trade") out = out.filter(c=>c.foundTrade);
   else if (state.statusFilter === "received") out = out.filter(c=>c.received);
-  else if (state.statusFilter === "pending") out = out.filter(c=>!c.received);
+  else if (state.statusFilter === "pending") out = out.filter(c=>c.foundTrade && !c.received);
+  else if (state.statusFilter === "notfound") out = out.filter(c=>!c.foundTrade && !c.received);
   return out;
 }
 
@@ -852,7 +1101,8 @@ async function renderCardsList(){
     img.alt = "";
     img.src = miniPreviewDataURL(c);
     const pos = c.thumbPos || {x:50, y:50};
-    img.style.objectPosition = `${pos.x}% ${pos.y}%`;
+    const zoom = clampZoom(c.thumbZoom ?? 1);
+    applyCropPreview(img, mini, pos, zoom);
     mini.appendChild(img);
 
     const editBtn = document.createElement("button");
@@ -967,6 +1217,9 @@ async function renderCardsList(){
       if (!ok) return;
       await db.delete("cards", c.id);
       state.cards = state.cards.filter(x=>x.id!==c.id);
+      if (state.selectedCardId === c.id) state.selectedCardId = null;
+      if (state.listHoverCardId === c.id) state.listHoverCardId = null;
+      if (state.hoverCardId === c.id) state.hoverCardId = null;
       await touchSeriesUpdated();
       refreshStatsAndRender();
     });
@@ -976,8 +1229,8 @@ async function renderCardsList(){
     meta.append(row1, checks, noteWrap, actions);
     wrap.append(mini, meta);
 
-    wrap.addEventListener("mouseenter", () => { state.highlightCardId = c.id; draw(); });
-    wrap.addEventListener("mouseleave", () => { state.highlightCardId = null; draw(); });
+    wrap.addEventListener("mouseenter", () => { state.listHoverCardId = c.id; draw(); });
+    wrap.addEventListener("mouseleave", () => { state.listHoverCardId = null; draw(); });
 
     els.cardsList.appendChild(wrap);
   });
@@ -986,11 +1239,28 @@ async function renderCardsList(){
 async function showCardOnCanvas(card){
   await setActivePart(card.partId);
   els.canvas.scrollIntoView({behavior:"smooth", block:"center"});
-  state.highlightCardId = card.id;
-  state.focusCardId = card.id;
-  state.focusUntil = Date.now() + 1400;
-  draw();
-  setTimeout(()=>{ state.highlightCardId = null; draw(); }, 1200);
+  startFocusPulse(card.id);
+}
+
+function startFocusPulse(cardId){
+  state.focusCardId = cardId;
+  state.focusStart = Date.now();
+  state.focusUntil = state.focusStart + 1500;
+  if (state.focusAnimationId){
+    cancelAnimationFrame(state.focusAnimationId);
+  }
+  const tick = () => {
+    if (!state.focusCardId || Date.now() > state.focusUntil){
+      state.focusCardId = null;
+      state.focusUntil = 0;
+      state.focusAnimationId = null;
+      draw();
+      return;
+    }
+    draw();
+    state.focusAnimationId = requestAnimationFrame(tick);
+  };
+  state.focusAnimationId = requestAnimationFrame(tick);
 }
 
 async function touchSeriesUpdated(){
@@ -1024,6 +1294,9 @@ function applyReceived(card, value){
 async function setActivePart(partId){
   if (!partId || partId === state.activePartId) return;
   state.activePartId = partId;
+  state.selectedCardId = null;
+  state.hoverCardId = null;
+  state.listHoverCardId = null;
   localStorage.setItem("ct_last_part_"+state.activeSeriesId, partId);
   renderPartSelect();
   await loadActivePartImage();
@@ -1140,6 +1413,7 @@ async function deleteSeriesById(id){
   const parts = await db.getAllByIndex("parts","seriesId", id);
   for (const p of parts) await db.delete("parts", p.id);
   await db.delete("series", id);
+  clearCoverCache(id);
 
   state.series = state.series.filter(x=>x.id!==id);
   if (state.activeSeriesId === id){
@@ -1236,6 +1510,7 @@ async function importData(file){
   }
   for (const c of data.cards){
     if (c.note === undefined) c.note = "";
+    if (c.thumbZoom === undefined) c.thumbZoom = 1;
     await db.put("cards", c);
   }
   await loadAll();
@@ -1364,20 +1639,31 @@ function draw(){
 
   const partCards = state.cards.filter(c=>c.partId===state.activePartId);
   const focusActive = state.focusCardId && state.focusUntil && (Date.now() < state.focusUntil);
+  const visibleIds = new Set();
+  if (state.hoverCardId) visibleIds.add(state.hoverCardId);
+  if (state.listHoverCardId) visibleIds.add(state.listHoverCardId);
+  if (state.selectedCardId) visibleIds.add(state.selectedCardId);
+  if (focusActive && state.focusCardId) visibleIds.add(state.focusCardId);
+
   for (const c of partCards){
+    if (!visibleIds.has(c.id)) continue;
     const {cx:x1, cy:y1} = imageToCanvasCoords(c.x, c.y);
     const {cx:x2, cy:y2} = imageToCanvasCoords(c.x+c.w, c.y+c.h);
     const rr = rectNormalize(x1,y1,x2,y2);
 
-    const isHi = state.highlightCardId===c.id;
+    const isFocus = focusActive && c.id === state.focusCardId;
+    const isHi = isFocus || state.hoverCardId===c.id || state.listHoverCardId===c.id || state.selectedCardId===c.id;
     const isReceived = !!c.received;
     const isTrade = !!c.foundTrade;
 
     ctx.save();
-    if (focusActive && c.id !== state.focusCardId){
-      ctx.globalAlpha = 0.18;
+    let pulseBoost = 1;
+    if (isFocus){
+      const progress = clamp((Date.now() - state.focusStart) / Math.max(1, state.focusUntil - state.focusStart), 0, 1);
+      pulseBoost = 0.9 + Math.sin(progress * Math.PI) * 0.5;
     }
-    ctx.lineWidth = devicePx(isHi ? 2.6 : 1.6);
+    ctx.lineWidth = devicePx(isHi ? (2.2 * pulseBoost) : 1.6);
+    ctx.globalAlpha = isFocus ? 0.95 : 0.85;
 
     ctx.strokeStyle = isReceived ? "rgba(34,197,94,0.95)"
                   : isTrade ? "rgba(245,158,11,0.95)"
@@ -1413,15 +1699,33 @@ async function onPointerDown(evt){
   const {x,y} = pointerPos(evt);
   if (!isPointInsideImage(x,y)) return;
   state.drag.active = true;
+  state.hoverCardId = null;
   state.drag.startX = x; state.drag.startY = y;
   state.drag.curX = x; state.drag.curY = y;
   draw();
 }
 function onPointerMove(evt){
-  if (!state.drag.active) return;
   const {x,y} = pointerPos(evt);
-  state.drag.curX = x; state.drag.curY = y;
-  draw();
+  if (state.drag.active){
+    state.drag.curX = x; state.drag.curY = y;
+    draw();
+    return;
+  }
+  if (!state.image) return;
+  if (!isPointInsideImage(x,y)){
+    if (state.hoverCardId){
+      state.hoverCardId = null;
+      draw();
+    }
+    return;
+  }
+  const {x:ix, y:iy} = canvasToImageCoords(x, y);
+  const hit = findCardAtPoint(ix, iy);
+  const nextId = hit ? hit.id : null;
+  if (nextId !== state.hoverCardId){
+    state.hoverCardId = nextId;
+    draw();
+  }
 }
 async function onPointerUp(evt){
   if (!state.drag.active) return;
@@ -1435,11 +1739,12 @@ async function onPointerUp(evt){
       if (hit){
         await setActivePart(hit.partId);
         await focusCardInList(hit);
-        state.highlightCardId = hit.id;
+        state.selectedCardId = hit.id;
         draw();
         return;
       }
     }
+    state.selectedCardId = null;
     draw();
     return;
   }
@@ -1464,6 +1769,7 @@ async function onPointerUp(evt){
     title: "",
     note: "",
     thumbPos: {x:50, y:50},
+    thumbZoom: 1,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -1509,12 +1815,14 @@ function applyHomeSortSetting(key, dir){
 
 async function openThumbEditor(card){
   const pos = card.thumbPos ? {...card.thumbPos} : {x:50, y:50};
+  const zoom = clampZoom(card.thumbZoom ?? 1);
   const img = new Image();
   img.src = miniPreviewDataURL(card);
   await img.decode().catch(()=>{});
   state.thumbEdit = {
     card,
     pos,
+    zoom,
     imgW: img.width || 1,
     imgH: img.height || 1,
     isDragging: false,
@@ -1523,14 +1831,17 @@ async function openThumbEditor(card){
     startPos: {...pos},
   };
   els.thumbImage.src = img.src;
-  els.thumbImage.style.objectPosition = `${pos.x}% ${pos.y}%`;
   els.dlgThumbPos.showModal();
+  requestAnimationFrame(() => {
+    applyCropToImage(state.thumbEdit, els.thumbFrame, els.thumbImage);
+    updateZoomUI(state.thumbEdit, els.thumbZoom, els.thumbZoomValue);
+  });
 }
 
 async function openCoverEditor(seriesId){
   const series = state.series.find(s => s.id === seriesId);
   if (!series) return;
-  const { blob, pos, partId } = await getSeriesCover(seriesId);
+  const { blob, pos, zoom, partId } = await getSeriesCover(seriesId);
   if (!blob || !partId) return;
   const thumbEl = document.querySelector(`.home-card[data-id="${seriesId}"] .home-thumb`);
   if (thumbEl){
@@ -1552,6 +1863,7 @@ async function openCoverEditor(seriesId){
     series,
     partId,
     pos: {...pos},
+    zoom: clampZoom(zoom ?? 1),
     imgW: img.width || 1,
     imgH: img.height || 1,
     isDragging: false,
@@ -1561,8 +1873,11 @@ async function openCoverEditor(seriesId){
     imageUrl,
   };
   els.coverImage.src = imageUrl;
-  els.coverImage.style.objectPosition = `${pos.x}% ${pos.y}%`;
   els.dlgCoverPos.showModal();
+  requestAnimationFrame(() => {
+    applyCropToImage(state.coverEdit, els.coverFrame, els.coverImage);
+    updateZoomUI(state.coverEdit, els.coverZoom, els.coverZoomValue);
+  });
 }
 
 function updateCropPositionFromDrag(editState, frameEl, imgEl, deltaX, deltaY){
@@ -1571,18 +1886,16 @@ function updateCropPositionFromDrag(editState, frameEl, imgEl, deltaX, deltaY){
   const frameW = frameRect.width || 1;
   const frameH = frameRect.height || 1;
   const { imgW, imgH } = editState;
-  const scale = Math.max(frameW / imgW, frameH / imgH);
-  const scaledW = imgW * scale;
-  const scaledH = imgH * scale;
-  const overflowX = Math.max(0, scaledW - frameW);
-  const overflowY = Math.max(0, scaledH - frameH);
-  const startOffsetX = overflowX ? (editState.startPos.x / 100) * overflowX : 0;
-  const startOffsetY = overflowY ? (editState.startPos.y / 100) * overflowY : 0;
+  const zoom = clampZoom(editState.zoom || 1);
+  const { overflowX, overflowY } = getCropMetrics(imgW, imgH, frameW, frameH, zoom);
+  const startPos = editState.startPos || {x:50, y:50};
+  const startOffsetX = overflowX ? (startPos.x / 100) * overflowX : 0;
+  const startOffsetY = overflowY ? (startPos.y / 100) * overflowY : 0;
   const nextOffsetX = clamp(startOffsetX - deltaX, 0, overflowX);
   const nextOffsetY = clamp(startOffsetY - deltaY, 0, overflowY);
   editState.pos.x = overflowX ? (nextOffsetX / overflowX) * 100 : 50;
   editState.pos.y = overflowY ? (nextOffsetY / overflowY) * 100 : 50;
-  imgEl.style.objectPosition = `${editState.pos.x}% ${editState.pos.y}%`;
+  applyCropToImage(editState, frameEl, imgEl);
 }
 
 async function refreshSeriesCover(seriesId){
@@ -1592,8 +1905,10 @@ async function refreshSeriesCover(seriesId){
   if (!parts.length) return;
   series.coverPartId = parts[0].id;
   series.coverPos = {x:50, y:50};
+  series.coverZoom = 1;
   series.updatedAt = Date.now();
   await db.put("series", series);
+  clearCoverCache(seriesId);
   state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
   renderSeriesList();
   await renderHome();
@@ -1601,6 +1916,7 @@ async function refreshSeriesCover(seriesId){
 
 /* ---------- Events ---------- */
 function initEvents(){
+  setupImageViewer();
   els.btnHome.addEventListener("click", showHome);
   els.btnHomeBrand.addEventListener("click", showHome);
 
@@ -1677,6 +1993,10 @@ function initEvents(){
     await addPartsFromFiles(els.fileImage.files);
     els.fileImage.value = "";
   });
+  els.dropzone.addEventListener("click", () => {
+    if (state.parts.length !== 0) return;
+    els.fileImage.click();
+  });
 
   els.btnUndo.addEventListener("click", undoLastInActivePart);
   els.btnDeletePart.addEventListener("click", async () => {
@@ -1705,6 +2025,12 @@ function initEvents(){
     if (!state.thumbEdit?.isDragging) return;
     updateCropPositionFromDrag(state.thumbEdit, els.thumbFrame, els.thumbImage, evt.clientX - state.thumbEdit.startX, evt.clientY - state.thumbEdit.startY);
   });
+  els.thumbFrame.addEventListener("wheel", (evt) => {
+    if (!state.thumbEdit) return;
+    evt.preventDefault();
+    const delta = evt.deltaY < 0 ? CROP_ZOOM_STEP : -CROP_ZOOM_STEP;
+    nudgeCropZoom(state.thumbEdit, els.thumbFrame, els.thumbImage, els.thumbZoom, els.thumbZoomValue, delta);
+  }, { passive: false });
   const endThumbDrag = (evt) => {
     if (!state.thumbEdit) return;
     state.thumbEdit.isDragging = false;
@@ -1717,12 +2043,25 @@ function initEvents(){
     if (!state.thumbEdit) return;
     state.thumbEdit.pos = {x:50, y:50};
     state.thumbEdit.startPos = {x:50, y:50};
-    els.thumbImage.style.objectPosition = "50% 50%";
+    state.thumbEdit.zoom = 1;
+    applyCropToImage(state.thumbEdit, els.thumbFrame, els.thumbImage);
+    updateZoomUI(state.thumbEdit, els.thumbZoom, els.thumbZoomValue);
+  });
+  els.thumbZoom.addEventListener("input", () => {
+    if (!state.thumbEdit) return;
+    setCropZoom(state.thumbEdit, els.thumbFrame, els.thumbImage, els.thumbZoom, els.thumbZoomValue, els.thumbZoom.value);
+  });
+  els.thumbZoomIn.addEventListener("click", () => {
+    nudgeCropZoom(state.thumbEdit, els.thumbFrame, els.thumbImage, els.thumbZoom, els.thumbZoomValue, CROP_ZOOM_STEP);
+  });
+  els.thumbZoomOut.addEventListener("click", () => {
+    nudgeCropZoom(state.thumbEdit, els.thumbFrame, els.thumbImage, els.thumbZoom, els.thumbZoomValue, -CROP_ZOOM_STEP);
   });
   els.dlgThumbPos.addEventListener("close", async () => {
     if (!state.thumbEdit) return;
     if (els.dlgThumbPos.returnValue === "ok"){
       state.thumbEdit.card.thumbPos = {...state.thumbEdit.pos};
+      state.thumbEdit.card.thumbZoom = clampZoom(state.thumbEdit.zoom || 1);
       state.thumbEdit.card.updatedAt = Date.now();
       await db.put("cards", state.thumbEdit.card);
       await touchSeriesUpdated();
@@ -1744,6 +2083,12 @@ function initEvents(){
     if (!state.coverEdit?.isDragging) return;
     updateCropPositionFromDrag(state.coverEdit, els.coverFrame, els.coverImage, evt.clientX - state.coverEdit.startX, evt.clientY - state.coverEdit.startY);
   });
+  els.coverFrame.addEventListener("wheel", (evt) => {
+    if (!state.coverEdit) return;
+    evt.preventDefault();
+    const delta = evt.deltaY < 0 ? CROP_ZOOM_STEP : -CROP_ZOOM_STEP;
+    nudgeCropZoom(state.coverEdit, els.coverFrame, els.coverImage, els.coverZoom, els.coverZoomValue, delta);
+  }, { passive: false });
   const endCoverDrag = (evt) => {
     if (!state.coverEdit) return;
     state.coverEdit.isDragging = false;
@@ -1756,15 +2101,37 @@ function initEvents(){
     if (!state.coverEdit) return;
     state.coverEdit.pos = {x:50, y:50};
     state.coverEdit.startPos = {x:50, y:50};
-    els.coverImage.style.objectPosition = "50% 50%";
+    state.coverEdit.zoom = 1;
+    applyCropToImage(state.coverEdit, els.coverFrame, els.coverImage);
+    updateZoomUI(state.coverEdit, els.coverZoom, els.coverZoomValue);
+  });
+  els.coverZoom.addEventListener("input", () => {
+    if (!state.coverEdit) return;
+    setCropZoom(state.coverEdit, els.coverFrame, els.coverImage, els.coverZoom, els.coverZoomValue, els.coverZoom.value);
+  });
+  els.coverZoomIn.addEventListener("click", () => {
+    nudgeCropZoom(state.coverEdit, els.coverFrame, els.coverImage, els.coverZoom, els.coverZoomValue, CROP_ZOOM_STEP);
+  });
+  els.coverZoomOut.addEventListener("click", () => {
+    nudgeCropZoom(state.coverEdit, els.coverFrame, els.coverImage, els.coverZoom, els.coverZoomValue, -CROP_ZOOM_STEP);
   });
   els.dlgCoverPos.addEventListener("close", async () => {
     if (!state.coverEdit) return;
     if (els.dlgCoverPos.returnValue === "ok"){
       state.coverEdit.series.coverPos = {...state.coverEdit.pos};
+      state.coverEdit.series.coverZoom = clampZoom(state.coverEdit.zoom || 1);
       state.coverEdit.series.coverPartId = state.coverEdit.partId;
       state.coverEdit.series.updatedAt = Date.now();
       await db.put("series", state.coverEdit.series);
+      const cached = state.coverCache.get(state.coverEdit.series.id);
+      if (cached){
+        state.coverCache.set(state.coverEdit.series.id, {
+          ...cached,
+          pos: {...state.coverEdit.pos},
+          zoom: clampZoom(state.coverEdit.zoom || 1),
+          partId: state.coverEdit.partId,
+        });
+      }
       state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
       renderSeriesList();
       await renderHome();
@@ -1779,6 +2146,12 @@ function initEvents(){
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("pointerleave", () => {
+    if (state.hoverCardId){
+      state.hoverCardId = null;
+      draw();
+    }
+  });
 
   window.addEventListener("resize", () => resizeCanvasAndRedraw());
 

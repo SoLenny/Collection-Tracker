@@ -6,6 +6,7 @@
   <title>Collection Tracker</title>
   <meta name="theme-color" content="#7c3aed" />
   <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="./favicon.ico" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -139,6 +140,7 @@
                   <button class="chip" data-filter="trade">Обмен найден</button>
                   <button class="chip" data-filter="received">Получено</button>
                   <button class="chip" data-filter="pending">Жду</button>
+                  <button class="chip" data-filter="notfound">Не найдено</button>
                 </div>
 
                 <div class="cards-controls-right">
@@ -149,11 +151,11 @@
                   <div class="toggle-all">
                     <label class="toggle master-toggle">
                       <input id="masterTrade" type="checkbox" />
-                      <span>Отметить все: Обмен найден</span>
+                      <span>Все: Обмен</span>
                     </label>
                     <label class="toggle master-toggle">
                       <input id="masterReceived" type="checkbox" />
-                      <span>Отметить все: Получено</span>
+                      <span>Все: Получено</span>
                     </label>
                   </div>
                 </div>
@@ -214,6 +216,12 @@
         <div class="thumb-frame" id="thumbFrame">
           <img id="thumbImage" alt="" draggable="false" />
         </div>
+        <div class="zoom-controls">
+          <button id="thumbZoomOut" class="zoom-btn" type="button" aria-label="Уменьшить">−</button>
+          <input id="thumbZoom" class="zoom-slider" type="range" min="1" max="3" step="0.01" value="1" />
+          <button id="thumbZoomIn" class="zoom-btn" type="button" aria-label="Увеличить">＋</button>
+          <span id="thumbZoomValue" class="zoom-value">100%</span>
+        </div>
         <div class="thumb-hint">Перетаскивай изображение, чтобы выбрать область миниатюры.</div>
       </div>
       <div class="dialog-actions">
@@ -231,6 +239,12 @@
         <div class="cover-frame" id="coverFrame">
           <img id="coverImage" alt="" draggable="false" />
         </div>
+        <div class="zoom-controls">
+          <button id="coverZoomOut" class="zoom-btn" type="button" aria-label="Уменьшить">−</button>
+          <input id="coverZoom" class="zoom-slider" type="range" min="1" max="3" step="0.01" value="1" />
+          <button id="coverZoomIn" class="zoom-btn" type="button" aria-label="Увеличить">＋</button>
+          <span id="coverZoomValue" class="zoom-value">100%</span>
+        </div>
         <div class="thumb-hint">Перетаскивай изображение, чтобы выбрать область обложки.</div>
       </div>
       <div class="dialog-actions">
@@ -242,6 +256,6 @@
   </dialog>
 
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v4.1.5</div>
+  <div class="version-badge" id="versionBadge">v4.1.6</div>
 </body>
 </html>
