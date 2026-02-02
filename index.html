@@ -31,10 +31,19 @@
   <main class="app">
     <aside class="sidebar">
       <div class="panel">
-        <div class="panel-head">
-          <div class="panel-title">Серии</div>
-          <button id="btnNewSeries" class="btn primary">＋ Добавить</button>
-        </div>
+      <div class="panel-head">
+        <div class="panel-title">Серии</div>
+        <button id="btnNewSeries" class="btn primary">＋ Добавить</button>
+      </div>
+      <div class="panel-search">
+        <span class="search-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
+            <path d="M16.5 16.5L21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <input id="seriesSearch" type="search" class="input" placeholder="Поиск серии" aria-label="Поиск серии" />
+      </div>
         <div id="seriesList" class="series-list" role="list"></div>
         <div class="hint">
           <div class="hint-title">Быстро</div>
@@ -57,6 +66,19 @@
           </div>
           <button id="btnNewSeries2" class="btn primary">＋ Добавить серию</button>
         </div>
+        <div class="home-controls">
+          <div class="home-sort">
+            <span class="home-sort-label">Сортировать</span>
+            <select id="homeSortKey" class="select">
+              <option value="updated">Дата обновления</option>
+              <option value="created">Дата создания</option>
+              <option value="completion">Завершенность</option>
+              <option value="title">Название</option>
+              <option value="size">Размер</option>
+            </select>
+            <button id="homeSortDir" class="btn ghost tiny" type="button" aria-label="Сортировка по убыванию">↓</button>
+          </div>
+        </div>
         <div id="homeGrid" class="home-grid"></div>
         <div id="homeEmpty" class="home-empty hidden">
           <div class="empty-card">
@@ -70,23 +92,24 @@
       <div id="seriesView" class="series-view hidden">
         <div class="series-toolbar">
           <div class="series-toolbar-left">
-            <input id="seriesName" class="series-name" type="text" placeholder="Название серии" />
+            <input id="seriesName" class="series-name" type="text" placeholder="Название серии" maxlength="60" />
             <div class="series-stats" id="seriesStats">—</div>
-            <div class="part-picker">
-              <select id="partSelect" class="select"></select>
-            </div>
+            <select id="partSelect" class="select part-select"></select>
           </div>
 
           <div class="series-toolbar-right">
             <div class="series-actions">
-              <label class="btn">
-                ＋ Добавить изображение
-                <input id="fileImage" type="file" accept="image/*" multiple />
-              </label>
-
-              <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение в текущей части">↶ Отменить</button>
-              <button id="btnDeletePart" class="btn danger ghost" title="Удалить текущую часть">Удалить часть</button>
-              <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
+              <div class="series-actions-row">
+                <button id="btnUndo" class="btn ghost" title="Убрать последнее выделение в текущей части">↶ Отменить</button>
+                <button id="btnDeletePart" class="btn danger ghost" title="Удалить текущую часть">Удалить часть</button>
+                <button id="btnDeleteSeries" class="btn danger ghost" title="Удалить серию">Удалить серию</button>
+              </div>
+              <div class="series-actions-row">
+                <label class="btn">
+                  ＋ Добавить изображение
+                  <input id="fileImage" type="file" accept="image/*" multiple />
+                </label>
+              </div>
             </div>
           </div>
         </div>
@@ -125,8 +148,14 @@
                     <select id="partFilter" class="select"></select>
                   </div>
                   <div class="toggle-all">
-                    <button id="toggleAllTrade" class="btn ghost tiny" type="button">Toggle all: Обмен найден</button>
-                    <button id="toggleAllReceived" class="btn ghost tiny" type="button">Toggle all: Получено</button>
+                    <label class="toggle master-toggle">
+                      <input id="masterTrade" type="checkbox" />
+                      <span>Отметить все: Обмен найден</span>
+                    </label>
+                    <label class="toggle master-toggle">
+                      <input id="masterReceived" type="checkbox" />
+                      <span>Отметить все: Получено</span>
+                    </label>
                   </div>
                 </div>
               </div>
@@ -144,7 +173,7 @@
       <div class="dialog-title">Новая серия</div>
       <label class="field">
         <span>Название (необязательно)</span>
-        <input id="newSeriesName" type="text" placeholder="Можно оставить пустым" />
+        <input id="newSeriesName" type="text" placeholder="Можно оставить пустым" maxlength="60" />
       </label>
       <div class="dialog-actions">
         <button class="btn ghost" value="cancel" formnovalidate>Отмена</button>
@@ -179,7 +208,24 @@
     </form>
   </dialog>
 
+  <dialog id="dlgThumbPos" class="dialog">
+    <form method="dialog" class="dialog-card dialog-thumb">
+      <div class="dialog-title">Позиция миниатюры</div>
+      <div class="thumb-editor">
+        <div class="thumb-frame" id="thumbFrame">
+          <img id="thumbImage" alt="" draggable="false" />
+        </div>
+        <div class="thumb-hint">Перетаскивай изображение, чтобы выбрать область миниатюры.</div>
+      </div>
+      <div class="dialog-actions">
+        <button id="thumbReset" class="btn ghost" type="button">Сбросить</button>
+        <button class="btn ghost" value="cancel" formnovalidate>Отмена</button>
+        <button id="thumbSave" class="btn primary" value="ok">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v4.1.3</div>
+  <div class="version-badge" id="versionBadge">v4.1.4</div>
 </body>
 </html>

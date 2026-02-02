@@ -1,4 +1,4 @@
-const VERSION = "v4.1.3";
+const VERSION = "v4.1.4";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -124,18 +124,21 @@ const els = {
   btnNewSeries: $("#btnNewSeries"),
   btnNewSeries2: $("#btnNewSeries2"),
   btnNewSeries3: $("#btnNewSeries3"),
+  seriesSearch: $("#seriesSearch"),
 
   homeView: $("#homeView"),
   homeGrid: $("#homeGrid"),
   homeEmpty: $("#homeEmpty"),
+  homeSortKey: $("#homeSortKey"),
+  homeSortDir: $("#homeSortDir"),
 
   seriesView: $("#seriesView"),
   seriesName: $("#seriesName"),
   seriesStats: $("#seriesStats"),
   partSelect: $("#partSelect"),
   partFilter: $("#partFilter"),
-  toggleAllTrade: $("#toggleAllTrade"),
-  toggleAllReceived: $("#toggleAllReceived"),
+  masterTrade: $("#masterTrade"),
+  masterReceived: $("#masterReceived"),
   fileImage: $("#fileImage"),
   btnUndo: $("#btnUndo"),
   btnDeletePart: $("#btnDeletePart"),
@@ -154,6 +157,12 @@ const els = {
   confirmText: $("#confirmText"),
   confirmOk: $("#confirmOk"),
 
+  dlgThumbPos: $("#dlgThumbPos"),
+  thumbFrame: $("#thumbFrame"),
+  thumbImage: $("#thumbImage"),
+  thumbSave: $("#thumbSave"),
+  thumbReset: $("#thumbReset"),
+
   canvas: $("#canvas"),
 };
 
@@ -166,6 +175,9 @@ let state = {
 
   statusFilter: "all",
   partFilter: "all",
+  seriesSearch: "",
+  homeSortKey: "updated",
+  homeSortDir: "desc",
 
   image: null,
   imageURL: null,
@@ -176,6 +188,7 @@ let state = {
 
   drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
   imageByPart: new Map(),
+  thumbEdit: null,
 };
 
 function uid(prefix="id"){ return `${prefix}_${crypto.randomUUID()}`; }
@@ -291,8 +304,9 @@ function showSeries(){
 /* ---------- Rendering: sidebar series list ---------- */
 function renderSeriesList(){
   const active = state.activeSeriesId;
+  const term = state.seriesSearch.trim().toLowerCase();
   els.seriesList.innerHTML = "";
-  for (const s of state.series){
+  for (const s of state.series.filter(s => seriesDisplayName(s.name).toLowerCase().includes(term))){
     const item = document.createElement("div");
     item.className = "series-item" + (s.id===active ? " active" : "");
     item.dataset.id = s.id;
@@ -305,7 +319,9 @@ function renderSeriesList(){
     info.className = "series-info";
     const nameRow = document.createElement("div");
     nameRow.className = "series-name-row";
-    nameRow.textContent = seriesDisplayName(s.name);
+    const displayName = seriesDisplayName(s.name);
+    nameRow.textContent = displayName;
+    nameRow.title = displayName;
 
     const sub = document.createElement("div");
     sub.className = "series-sub";
@@ -362,7 +378,54 @@ async function renderHome(){
   }
   els.homeEmpty.classList.add("hidden");
 
-  for (const s of state.series){
+  const seriesStats = await Promise.all(state.series.map(async (s) => {
+    const cards = await db.getAllByIndex("cards","seriesId", s.id);
+    const progress = computeProgress(cards);
+    return {
+      series: s,
+      cards,
+      progress,
+      total: cards.length,
+      completion: progress.pct,
+      title: seriesDisplayName(s.name).toLowerCase(),
+    };
+  }));
+
+  let ordered = seriesStats.slice();
+  const dir = state.homeSortDir === "desc" ? -1 : 1;
+  if (state.homeSortKey){
+    ordered.sort((a,b) => {
+      let av = 0;
+      let bv = 0;
+      if (state.homeSortKey === "created"){
+        av = a.series.createdAt || 0;
+        bv = b.series.createdAt || 0;
+        return (av - bv) * dir;
+      }
+      if (state.homeSortKey === "updated"){
+        av = a.series.updatedAt || 0;
+        bv = b.series.updatedAt || 0;
+        return (av - bv) * dir;
+      }
+      if (state.homeSortKey === "completion"){
+        av = a.completion || 0;
+        bv = b.completion || 0;
+        return (av - bv) * dir;
+      }
+      if (state.homeSortKey === "size"){
+        av = a.total || 0;
+        bv = b.total || 0;
+        return (av - bv) * dir;
+      }
+      if (state.homeSortKey === "title"){
+        return a.title.localeCompare(b.title, "ru", {sensitivity:"base"}) * dir;
+      }
+      return 0;
+    });
+  }
+
+  for (const entry of ordered){
+    const s = entry.series;
     const cardEl = document.createElement("div");
     cardEl.className = "home-card";
     cardEl.dataset.id = s.id;
@@ -388,8 +451,7 @@ async function renderHome(){
     name.className = "home-name";
     name.textContent = seriesDisplayName(s.name);
 
-    const cards = await db.getAllByIndex("cards","seriesId", s.id);
-    const { total, received, pct } = computeProgress(cards);
+    const { total, received, pct } = entry.progress;
 
     const meta = document.createElement("div");
     meta.className = "home-meta";
@@ -495,6 +557,7 @@ function updatePartsUIVisibility(){
   const hide = state.parts.length <= 1;
   els.seriesView.classList.toggle("parts-hidden", hide);
   els.btnDeletePart.disabled = state.parts.length === 0;
+  els.btnDeletePart.classList.toggle("hidden", state.parts.length === 0);
 }
 
 function updateDropzoneVisibility(){
@@ -702,12 +765,30 @@ async function renderCardsList(){
     wrap.className = "card";
     wrap.dataset.cardId = c.id;
 
-    const mini = document.createElement("div");
+    const mini = document.createElement("button");
+    mini.type = "button";
     mini.className = "mini";
     const img = document.createElement("img");
     img.alt = "";
     img.src = miniPreviewDataURL(c);
+    const pos = c.thumbPos || {x:50, y:50};
+    img.style.objectPosition = `${pos.x}% ${pos.y}%`;
     mini.appendChild(img);
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "thumb-edit";
+    editBtn.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+      <path d="M4 20h4l10-10-4-4L4 16v4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M13 5l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>`;
+    editBtn.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      openThumbEditor(c);
+    });
+    mini.appendChild(editBtn);
+    mini.addEventListener("click", () => showCardOnCanvas(c));
 
     const meta = document.createElement("div");
     meta.className = "meta";
@@ -779,6 +860,7 @@ async function renderCardsList(){
     const ta = document.createElement("textarea");
     ta.placeholder = "Примечание (например, ссылка/ник/детали обмена)…";
     ta.value = c.note || "";
+    ta.maxLength = 300;
     let tmr = null;
     ta.addEventListener("input", () => {
       if (tmr) clearTimeout(tmr);
@@ -794,12 +876,6 @@ async function renderCardsList(){
     const actions = document.createElement("div");
     actions.className = "actions";
 
-    const btnShow = document.createElement("button");
-    btnShow.className = "iconbtn";
-    btnShow.type = "button";
-    btnShow.textContent = "Показать";
-    btnShow.addEventListener("click", async () => showCardOnCanvas(c));
-
     const btnDel = document.createElement("button");
     btnDel.className = "iconbtn danger";
     btnDel.type = "button";
@@ -813,7 +889,7 @@ async function renderCardsList(){
       refreshStatsAndRender();
     });
 
-    actions.append(btnShow, btnDel);
+    actions.append(btnDel);
 
     meta.append(row1, checks, noteWrap, actions);
     wrap.append(mini, meta);
@@ -850,6 +926,7 @@ function refreshStatsAndRender(){
   renderPartFilter();
   renderCardsList();
   draw();
+  updateMasterCheckboxes();
 }
 
 function applyFoundTrade(card, value){
@@ -870,6 +947,7 @@ async function setActivePart(partId){
   await loadActivePartImage();
   resizeCanvasAndRedraw();
   draw();
+  updateMasterCheckboxes();
 }
 
 function highlightCardInList(cardId){
@@ -899,14 +977,34 @@ async function focusCardInList(card){
   requestAnimationFrame(() => highlightCardInList(card.id));
 }
 
-async function toggleAllFoundTrade(){
+function updateMasterCheckboxes(){
+  const partCards = state.activePartId ? state.cards.filter(c=>c.partId===state.activePartId) : [];
+  if (!els.masterTrade || !els.masterReceived) return;
+  if (!partCards.length){
+    els.masterTrade.checked = false;
+    els.masterTrade.indeterminate = false;
+    els.masterTrade.disabled = true;
+    els.masterReceived.checked = false;
+    els.masterReceived.indeterminate = false;
+    els.masterReceived.disabled = true;
+    return;
+  }
+  const tradeCount = partCards.filter(c=>c.foundTrade).length;
+  const receivedCount = partCards.filter(c=>c.received).length;
+  els.masterTrade.disabled = false;
+  els.masterReceived.disabled = false;
+  els.masterTrade.checked = tradeCount === partCards.length;
+  els.masterTrade.indeterminate = tradeCount > 0 && tradeCount < partCards.length;
+  els.masterReceived.checked = receivedCount === partCards.length;
+  els.masterReceived.indeterminate = receivedCount > 0 && receivedCount < partCards.length;
+}
+
+async function setAllFoundTrade(value){
   if (!state.activePartId) return;
   const partCards = state.cards.filter(c=>c.partId===state.activePartId);
   if (!partCards.length) return;
-  const allOn = partCards.every(c=>c.foundTrade);
-  const next = !allOn;
   for (const c of partCards){
-    applyFoundTrade(c, next);
+    applyFoundTrade(c, value);
     c.updatedAt = Date.now();
     await db.put("cards", c);
   }
@@ -914,14 +1012,12 @@ async function toggleAllFoundTrade(){
   refreshStatsAndRender();
 }
 
-async function toggleAllReceived(){
+async function setAllReceived(value){
   if (!state.activePartId) return;
   const partCards = state.cards.filter(c=>c.partId===state.activePartId);
   if (!partCards.length) return;
-  const allOn = partCards.every(c=>c.received);
-  const next = !allOn;
   for (const c of partCards){
-    applyReceived(c, next);
+    applyReceived(c, value);
     c.updatedAt = Date.now();
     await db.put("cards", c);
   }
@@ -1279,6 +1375,7 @@ async function onPointerUp(evt){
     received: false,
     title: "",
     note: "",
+    thumbPos: {x:50, y:50},
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -1300,6 +1397,62 @@ async function undoLastInActivePart(){
   state.cards = state.cards.filter(x=>x.id!==last.id);
   await touchSeriesUpdated();
   refreshStatsAndRender();
+}
+
+function updateHomeSortControls(){
+  if (!els.homeSortKey || !els.homeSortDir) return;
+  els.homeSortKey.value = state.homeSortKey;
+  const isDesc = state.homeSortDir === "desc";
+  els.homeSortDir.textContent = isDesc ? "↓" : "↑";
+  els.homeSortDir.setAttribute("aria-label", isDesc ? "Сортировка по убыванию" : "Сортировка по возрастанию");
+}
+
+function applyHomeSortSetting(key, dir){
+  state.homeSortKey = key;
+  state.homeSortDir = dir;
+  localStorage.setItem("ct_home_sort_key", key);
+  localStorage.setItem("ct_home_sort_dir", dir);
+  updateHomeSortControls();
+  renderHome();
+}
+
+async function openThumbEditor(card){
+  const pos = card.thumbPos ? {...card.thumbPos} : {x:50, y:50};
+  const img = new Image();
+  img.src = miniPreviewDataURL(card);
+  await img.decode().catch(()=>{});
+  state.thumbEdit = {
+    card,
+    pos,
+    imgW: img.width || 1,
+    imgH: img.height || 1,
+    dragging: false,
+    startX: 0,
+    startY: 0,
+    startPos: {...pos},
+  };
+  els.thumbImage.src = img.src;
+  els.thumbImage.style.objectPosition = `${pos.x}% ${pos.y}%`;
+  els.dlgThumbPos.showModal();
+}
+
+function updateThumbPositionFromDrag(deltaX, deltaY){
+  if (!state.thumbEdit) return;
+  const frameRect = els.thumbFrame.getBoundingClientRect();
+  const size = frameRect.width || 1;
+  const { imgW, imgH } = state.thumbEdit;
+  const scale = Math.max(size / imgW, size / imgH);
+  const scaledW = imgW * scale;
+  const scaledH = imgH * scale;
+  const overflowX = Math.max(0, scaledW - size);
+  const overflowY = Math.max(0, scaledH - size);
+  const startOffsetX = overflowX ? (state.thumbEdit.startPos.x / 100) * overflowX : 0;
+  const startOffsetY = overflowY ? (state.thumbEdit.startPos.y / 100) * overflowY : 0;
+  const nextOffsetX = clamp(startOffsetX - deltaX, 0, overflowX);
+  const nextOffsetY = clamp(startOffsetY - deltaY, 0, overflowY);
+  state.thumbEdit.pos.x = overflowX ? (nextOffsetX / overflowX) * 100 : 50;
+  state.thumbEdit.pos.y = overflowY ? (nextOffsetY / overflowY) * 100 : 50;
+  els.thumbImage.style.objectPosition = `${state.thumbEdit.pos.x}% ${state.thumbEdit.pos.y}%`;
 }
 
 /* ---------- Events ---------- */
@@ -1341,6 +1494,19 @@ function initEvents(){
     await renderHome();
   });
 
+  els.seriesSearch.addEventListener("input", () => {
+    state.seriesSearch = els.seriesSearch.value || "";
+    renderSeriesList();
+  });
+
+  els.homeSortKey.addEventListener("change", () => {
+    applyHomeSortSetting(els.homeSortKey.value, state.homeSortDir);
+  });
+  els.homeSortDir.addEventListener("click", () => {
+    const next = state.homeSortDir === "desc" ? "asc" : "desc";
+    applyHomeSortSetting(state.homeSortKey, next);
+  });
+
   els.partSelect.addEventListener("change", async () => {
     const id = els.partSelect.value;
     if (!id || id === state.activePartId) return;
@@ -1374,8 +1540,49 @@ function initEvents(){
   });
   els.btnDeleteSeries.addEventListener("click", deleteActiveSeries);
 
-  els.toggleAllTrade.addEventListener("click", toggleAllFoundTrade);
-  els.toggleAllReceived.addEventListener("click", toggleAllReceived);
+  els.masterTrade.addEventListener("change", () => {
+    setAllFoundTrade(els.masterTrade.checked);
+  });
+  els.masterReceived.addEventListener("change", () => {
+    setAllReceived(els.masterReceived.checked);
+  });
+
+  els.thumbFrame.addEventListener("pointerdown", (evt) => {
+    if (!state.thumbEdit) return;
+    state.thumbEdit.dragging = true;
+    state.thumbEdit.startX = evt.clientX;
+    state.thumbEdit.startY = evt.clientY;
+    state.thumbEdit.startPos = {...state.thumbEdit.pos};
+    els.thumbFrame.setPointerCapture(evt.pointerId);
+  });
+  els.thumbFrame.addEventListener("pointermove", (evt) => {
+    if (!state.thumbEdit?.dragging) return;
+    updateThumbPositionFromDrag(evt.clientX - state.thumbEdit.startX, evt.clientY - state.thumbEdit.startY);
+  });
+  const endThumbDrag = (evt) => {
+    if (!state.thumbEdit) return;
+    state.thumbEdit.dragging = false;
+    if (evt?.pointerId) els.thumbFrame.releasePointerCapture(evt.pointerId);
+  };
+  els.thumbFrame.addEventListener("pointerup", endThumbDrag);
+  els.thumbFrame.addEventListener("pointercancel", endThumbDrag);
+  els.thumbReset.addEventListener("click", () => {
+    if (!state.thumbEdit) return;
+    state.thumbEdit.pos = {x:50, y:50};
+    state.thumbEdit.startPos = {x:50, y:50};
+    els.thumbImage.style.objectPosition = "50% 50%";
+  });
+  els.dlgThumbPos.addEventListener("close", async () => {
+    if (!state.thumbEdit) return;
+    if (els.dlgThumbPos.returnValue === "ok"){
+      state.thumbEdit.card.thumbPos = {...state.thumbEdit.pos};
+      state.thumbEdit.card.updatedAt = Date.now();
+      await db.put("cards", state.thumbEdit.card);
+      await touchSeriesUpdated();
+      refreshStatsAndRender();
+    }
+    state.thumbEdit = null;
+  });
 
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
@@ -1423,6 +1630,10 @@ async function loadAll(){
   await db.open();
   // NOTE: if you came from v3, we keep compatibility; migration is best-effort.
   try { await migrateIfNeeded(); } catch(e) { /* ignore */ }
+
+  state.homeSortKey = localStorage.getItem("ct_home_sort_key") || state.homeSortKey;
+  state.homeSortDir = localStorage.getItem("ct_home_sort_dir") || state.homeSortDir;
+  updateHomeSortControls();
 
   state.series = (await db.getAll("series")).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
   renderSeriesList();
