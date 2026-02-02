@@ -1,4 +1,4 @@
-const VERSION = "v4.1.4";
+const VERSION = "v4.1.5";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -163,6 +163,12 @@ const els = {
   thumbSave: $("#thumbSave"),
   thumbReset: $("#thumbReset"),
 
+  dlgCoverPos: $("#dlgCoverPos"),
+  coverFrame: $("#coverFrame"),
+  coverImage: $("#coverImage"),
+  coverSave: $("#coverSave"),
+  coverReset: $("#coverReset"),
+
   canvas: $("#canvas"),
 };
 
@@ -189,6 +195,7 @@ let state = {
   drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
   imageByPart: new Map(),
   thumbEdit: null,
+  coverEdit: null,
 };
 
 function uid(prefix="id"){ return `${prefix}_${crypto.randomUUID()}`; }
@@ -211,6 +218,10 @@ function bestOverlap(r, cards){
   return best;
 }
 function seriesDisplayName(name){ return (name && name.trim()) ? name.trim() : "Без названия"; }
+function limitText(value, max){
+  if (typeof value !== "string") return "";
+  return value.length > max ? value.slice(0, max) : value;
+}
 
 function humanStats(cards){
   const total = cards.length;
@@ -331,7 +342,18 @@ function renderSeriesList(){
     sub.appendChild(badge);
 
     info.append(nameRow, sub);
-    item.append(thumb, info);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "series-delete";
+    del.setAttribute("aria-label", "Удалить серию");
+    del.textContent = "×";
+    del.addEventListener("click", async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      await deleteSeriesById(s.id);
+    });
+
+    item.append(thumb, info, del);
 
     // Open
     item.addEventListener("click", () => openSeries(s.id));
@@ -339,12 +361,13 @@ function renderSeriesList(){
 
     // Async: thumbnail
     (async () => {
-      const blob = await seriesPreviewBlob(s.id);
+      const { blob, pos } = await getSeriesCover(s.id);
       if (!blob) return;
       const url = URL.createObjectURL(blob);
       const img = new Image();
       img.src = url;
       img.onload = () => URL.revokeObjectURL(url);
+      img.style.objectPosition = `${pos.x}% ${pos.y}%`;
       thumb.innerHTML = "";
       thumb.appendChild(img);
     })();
@@ -364,9 +387,20 @@ function escapeHtml(str){
   return (str ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-async function seriesPreviewBlob(seriesId){
+async function getSeriesCover(seriesId){
+  const series = state.series.find(s => s.id === seriesId);
   const parts = (await db.getAllByIndex("parts","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
-  return parts[0]?.imageBlob || null;
+  if (!parts.length){
+    return { blob: null, pos: {x:50, y:50}, partId: null };
+  }
+  const coverPartId = series?.coverPartId;
+  const part = parts.find(p => p.id === coverPartId) || parts[0];
+  const rawPos = series?.coverPos || {x:50, y:50};
+  const pos = {
+    x: clamp(Number(rawPos.x) || 50, 0, 100),
+    y: clamp(Number(rawPos.y) || 50, 0, 100),
+  };
+  return { blob: part?.imageBlob || null, pos, partId: part?.id || null };
 }
 
 /* ---------- Home ---------- */
@@ -412,11 +446,6 @@ async function renderHome(){
         bv = b.completion || 0;
         return (av - bv) * dir;
       }
-      if (state.homeSortKey === "size"){
-        av = a.total || 0;
-        bv = b.total || 0;
-        return (av - bv) * dir;
-      }
       if (state.homeSortKey === "title"){
         return a.title.localeCompare(b.title, "ru", {sensitivity:"base"}) * dir;
       }
@@ -434,15 +463,50 @@ async function renderHome(){
     thumb.className = "home-thumb";
     thumb.innerHTML = `<div class="ph">✦</div>`;
 
+    const actions = document.createElement("div");
+    actions.className = "home-thumb-actions";
+    const btnEdit = document.createElement("button");
+    btnEdit.type = "button";
+    btnEdit.className = "thumb-action";
+    btnEdit.setAttribute("aria-label", "Настроить обложку");
+    btnEdit.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+      <path d="M4 20h4l10-10-4-4L4 16v4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M13 5l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>`;
+    btnEdit.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      openCoverEditor(s.id);
+    });
+    const btnRefresh = document.createElement("button");
+    btnRefresh.type = "button";
+    btnRefresh.className = "thumb-action";
+    btnRefresh.setAttribute("aria-label", "Обновить обложку");
+    btnRefresh.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none">
+      <path d="M4 12a8 8 0 0 1 14-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      <path d="M18 5v4h-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M20 12a8 8 0 0 1-14 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>`;
+    btnRefresh.addEventListener("click", async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      await refreshSeriesCover(s.id);
+    });
+    actions.append(btnEdit, btnRefresh);
+    thumb.appendChild(actions);
+
     (async () => {
-      const blob = await seriesPreviewBlob(s.id);
+      const { blob, pos } = await getSeriesCover(s.id);
       if (!blob) return;
       const url = URL.createObjectURL(blob);
       const img = new Image();
       img.src = url;
       img.onload = () => URL.revokeObjectURL(url);
+      img.style.objectPosition = `${pos.x}% ${pos.y}%`;
+      thumb.classList.add("has-cover");
       thumb.innerHTML = "";
       thumb.appendChild(img);
+      thumb.appendChild(actions);
     })();
 
     const body = document.createElement("div");
@@ -611,6 +675,14 @@ async function addPartFromFile(file){
   state.activePartId = part.id;
   localStorage.setItem("ct_last_part_"+state.activeSeriesId, state.activePartId);
 
+  const series = state.series.find(s => s.id === state.activeSeriesId);
+  if (series && !series.coverPartId){
+    series.coverPartId = part.id;
+    series.coverPos = {x:50, y:50};
+    series.updatedAt = Date.now();
+    await db.put("series", series);
+  }
+
   await touchSeriesUpdated();
   renderPartSelect();
   renderPartFilter();
@@ -658,6 +730,14 @@ async function deletePart(partId){
       p.updatedAt = Date.now();
       await db.put("parts", p);
     }
+  }
+
+  const series = state.series.find(s => s.id === state.activeSeriesId);
+  if (series && series.coverPartId === partId){
+    series.coverPartId = state.parts[0]?.id || null;
+    series.coverPos = {x:50, y:50};
+    series.updatedAt = Date.now();
+    await db.put("series", series);
   }
 
   if (state.activePartId === partId){
@@ -798,12 +878,14 @@ async function renderCardsList(){
     const label = document.createElement("input");
     label.className = "label title-input";
     label.type = "text";
+    label.maxLength = 60;
     label.value = (c.title || "").trim() || cardLabel(idx);
     label.placeholder = cardLabel(idx);
     let titleTmr = null;
     label.addEventListener("input", () => {
       if (titleTmr) clearTimeout(titleTmr);
       titleTmr = setTimeout(async () => {
+        label.value = limitText(label.value, 60);
         c.title = label.value.trim();
         c.updatedAt = Date.now();
         await db.put("cards", c);
@@ -1027,7 +1109,7 @@ async function setAllReceived(value){
 
 /* ---------- Create / Delete series ---------- */
 async function createSeries(nameRaw){
-  const name = (nameRaw||"").trim() || nextAutoCollectionName();
+  const name = limitText((nameRaw||"").trim(), 60) || nextAutoCollectionName();
   const s = {
     id: uid("series"),
     name,
@@ -1044,9 +1126,12 @@ async function createSeries(nameRaw){
 async function deleteActiveSeries(){
   const id = state.activeSeriesId;
   if (!id) return;
+  await deleteSeriesById(id);
+}
+
+async function deleteSeriesById(id){
   const s = state.series.find(x=>x.id===id);
   if (!s) return;
-
   const ok = await confirmDialog("Удалить серию?", `Серия “${seriesDisplayName(s.name)}” и все её данные будут удалены.`, "Удалить");
   if (!ok) return;
 
@@ -1057,14 +1142,17 @@ async function deleteActiveSeries(){
   await db.delete("series", id);
 
   state.series = state.series.filter(x=>x.id!==id);
-  state.parts = [];
-  state.cards = [];
-  state.activeSeriesId = null;
-  state.activePartId = null;
+  if (state.activeSeriesId === id){
+    state.parts = [];
+    state.cards = [];
+    state.activeSeriesId = null;
+    state.activePartId = null;
+    localStorage.removeItem("ct_last_series");
+    showHome();
+  }
 
   await renderHome();
   renderSeriesList();
-  showHome();
 }
 
 async function confirmDialog(title, text, okText="Ок"){
@@ -1399,8 +1487,11 @@ async function undoLastInActivePart(){
   refreshStatsAndRender();
 }
 
+const HOME_SORT_KEYS = new Set(["updated", "created", "completion", "title"]);
+
 function updateHomeSortControls(){
   if (!els.homeSortKey || !els.homeSortDir) return;
+  state.homeSortKey = HOME_SORT_KEYS.has(state.homeSortKey) ? state.homeSortKey : "updated";
   els.homeSortKey.value = state.homeSortKey;
   const isDesc = state.homeSortDir === "desc";
   els.homeSortDir.textContent = isDesc ? "↓" : "↑";
@@ -1408,9 +1499,9 @@ function updateHomeSortControls(){
 }
 
 function applyHomeSortSetting(key, dir){
-  state.homeSortKey = key;
+  state.homeSortKey = HOME_SORT_KEYS.has(key) ? key : "updated";
   state.homeSortDir = dir;
-  localStorage.setItem("ct_home_sort_key", key);
+  localStorage.setItem("ct_home_sort_key", state.homeSortKey);
   localStorage.setItem("ct_home_sort_dir", dir);
   updateHomeSortControls();
   renderHome();
@@ -1426,7 +1517,7 @@ async function openThumbEditor(card){
     pos,
     imgW: img.width || 1,
     imgH: img.height || 1,
-    dragging: false,
+    isDragging: false,
     startX: 0,
     startY: 0,
     startPos: {...pos},
@@ -1436,23 +1527,76 @@ async function openThumbEditor(card){
   els.dlgThumbPos.showModal();
 }
 
-function updateThumbPositionFromDrag(deltaX, deltaY){
-  if (!state.thumbEdit) return;
-  const frameRect = els.thumbFrame.getBoundingClientRect();
-  const size = frameRect.width || 1;
-  const { imgW, imgH } = state.thumbEdit;
-  const scale = Math.max(size / imgW, size / imgH);
+async function openCoverEditor(seriesId){
+  const series = state.series.find(s => s.id === seriesId);
+  if (!series) return;
+  const { blob, pos, partId } = await getSeriesCover(seriesId);
+  if (!blob || !partId) return;
+  const thumbEl = document.querySelector(`.home-card[data-id="${seriesId}"] .home-thumb`);
+  if (thumbEl){
+    const rect = thumbEl.getBoundingClientRect();
+    if (rect.width && rect.height){
+      els.coverFrame.style.aspectRatio = `${rect.width} / ${rect.height}`;
+    }
+  } else {
+    els.coverFrame.style.aspectRatio = "16 / 9";
+  }
+  if (state.coverEdit?.imageUrl){
+    URL.revokeObjectURL(state.coverEdit.imageUrl);
+  }
+  const imageUrl = URL.createObjectURL(blob);
+  const img = new Image();
+  img.src = imageUrl;
+  await img.decode().catch(()=>{});
+  state.coverEdit = {
+    series,
+    partId,
+    pos: {...pos},
+    imgW: img.width || 1,
+    imgH: img.height || 1,
+    isDragging: false,
+    startX: 0,
+    startY: 0,
+    startPos: {...pos},
+    imageUrl,
+  };
+  els.coverImage.src = imageUrl;
+  els.coverImage.style.objectPosition = `${pos.x}% ${pos.y}%`;
+  els.dlgCoverPos.showModal();
+}
+
+function updateCropPositionFromDrag(editState, frameEl, imgEl, deltaX, deltaY){
+  if (!editState) return;
+  const frameRect = frameEl.getBoundingClientRect();
+  const frameW = frameRect.width || 1;
+  const frameH = frameRect.height || 1;
+  const { imgW, imgH } = editState;
+  const scale = Math.max(frameW / imgW, frameH / imgH);
   const scaledW = imgW * scale;
   const scaledH = imgH * scale;
-  const overflowX = Math.max(0, scaledW - size);
-  const overflowY = Math.max(0, scaledH - size);
-  const startOffsetX = overflowX ? (state.thumbEdit.startPos.x / 100) * overflowX : 0;
-  const startOffsetY = overflowY ? (state.thumbEdit.startPos.y / 100) * overflowY : 0;
+  const overflowX = Math.max(0, scaledW - frameW);
+  const overflowY = Math.max(0, scaledH - frameH);
+  const startOffsetX = overflowX ? (editState.startPos.x / 100) * overflowX : 0;
+  const startOffsetY = overflowY ? (editState.startPos.y / 100) * overflowY : 0;
   const nextOffsetX = clamp(startOffsetX - deltaX, 0, overflowX);
   const nextOffsetY = clamp(startOffsetY - deltaY, 0, overflowY);
-  state.thumbEdit.pos.x = overflowX ? (nextOffsetX / overflowX) * 100 : 50;
-  state.thumbEdit.pos.y = overflowY ? (nextOffsetY / overflowY) * 100 : 50;
-  els.thumbImage.style.objectPosition = `${state.thumbEdit.pos.x}% ${state.thumbEdit.pos.y}%`;
+  editState.pos.x = overflowX ? (nextOffsetX / overflowX) * 100 : 50;
+  editState.pos.y = overflowY ? (nextOffsetY / overflowY) * 100 : 50;
+  imgEl.style.objectPosition = `${editState.pos.x}% ${editState.pos.y}%`;
+}
+
+async function refreshSeriesCover(seriesId){
+  const series = state.series.find(s => s.id === seriesId);
+  if (!series) return;
+  const parts = (await db.getAllByIndex("parts", "seriesId", seriesId)).sort((a,b)=>a.index-b.index);
+  if (!parts.length) return;
+  series.coverPartId = parts[0].id;
+  series.coverPos = {x:50, y:50};
+  series.updatedAt = Date.now();
+  await db.put("series", series);
+  state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  renderSeriesList();
+  await renderHome();
 }
 
 /* ---------- Events ---------- */
@@ -1487,6 +1631,7 @@ function initEvents(){
   els.seriesName.addEventListener("input", async () => {
     const s = state.series.find(x=>x.id===state.activeSeriesId);
     if (!s) return;
+    els.seriesName.value = limitText(els.seriesName.value, 60);
     s.name = els.seriesName.value;
     s.updatedAt = Date.now();
     await db.put("series", s);
@@ -1549,23 +1694,25 @@ function initEvents(){
 
   els.thumbFrame.addEventListener("pointerdown", (evt) => {
     if (!state.thumbEdit) return;
-    state.thumbEdit.dragging = true;
+    evt.preventDefault();
+    state.thumbEdit.isDragging = true;
     state.thumbEdit.startX = evt.clientX;
     state.thumbEdit.startY = evt.clientY;
     state.thumbEdit.startPos = {...state.thumbEdit.pos};
     els.thumbFrame.setPointerCapture(evt.pointerId);
   });
   els.thumbFrame.addEventListener("pointermove", (evt) => {
-    if (!state.thumbEdit?.dragging) return;
-    updateThumbPositionFromDrag(evt.clientX - state.thumbEdit.startX, evt.clientY - state.thumbEdit.startY);
+    if (!state.thumbEdit?.isDragging) return;
+    updateCropPositionFromDrag(state.thumbEdit, els.thumbFrame, els.thumbImage, evt.clientX - state.thumbEdit.startX, evt.clientY - state.thumbEdit.startY);
   });
   const endThumbDrag = (evt) => {
     if (!state.thumbEdit) return;
-    state.thumbEdit.dragging = false;
+    state.thumbEdit.isDragging = false;
     if (evt?.pointerId) els.thumbFrame.releasePointerCapture(evt.pointerId);
   };
   els.thumbFrame.addEventListener("pointerup", endThumbDrag);
   els.thumbFrame.addEventListener("pointercancel", endThumbDrag);
+  els.thumbFrame.addEventListener("pointerleave", endThumbDrag);
   els.thumbReset.addEventListener("click", () => {
     if (!state.thumbEdit) return;
     state.thumbEdit.pos = {x:50, y:50};
@@ -1582,6 +1729,50 @@ function initEvents(){
       refreshStatsAndRender();
     }
     state.thumbEdit = null;
+  });
+
+  els.coverFrame.addEventListener("pointerdown", (evt) => {
+    if (!state.coverEdit) return;
+    evt.preventDefault();
+    state.coverEdit.isDragging = true;
+    state.coverEdit.startX = evt.clientX;
+    state.coverEdit.startY = evt.clientY;
+    state.coverEdit.startPos = {...state.coverEdit.pos};
+    els.coverFrame.setPointerCapture(evt.pointerId);
+  });
+  els.coverFrame.addEventListener("pointermove", (evt) => {
+    if (!state.coverEdit?.isDragging) return;
+    updateCropPositionFromDrag(state.coverEdit, els.coverFrame, els.coverImage, evt.clientX - state.coverEdit.startX, evt.clientY - state.coverEdit.startY);
+  });
+  const endCoverDrag = (evt) => {
+    if (!state.coverEdit) return;
+    state.coverEdit.isDragging = false;
+    if (evt?.pointerId) els.coverFrame.releasePointerCapture(evt.pointerId);
+  };
+  els.coverFrame.addEventListener("pointerup", endCoverDrag);
+  els.coverFrame.addEventListener("pointercancel", endCoverDrag);
+  els.coverFrame.addEventListener("pointerleave", endCoverDrag);
+  els.coverReset.addEventListener("click", () => {
+    if (!state.coverEdit) return;
+    state.coverEdit.pos = {x:50, y:50};
+    state.coverEdit.startPos = {x:50, y:50};
+    els.coverImage.style.objectPosition = "50% 50%";
+  });
+  els.dlgCoverPos.addEventListener("close", async () => {
+    if (!state.coverEdit) return;
+    if (els.dlgCoverPos.returnValue === "ok"){
+      state.coverEdit.series.coverPos = {...state.coverEdit.pos};
+      state.coverEdit.series.coverPartId = state.coverEdit.partId;
+      state.coverEdit.series.updatedAt = Date.now();
+      await db.put("series", state.coverEdit.series);
+      state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+      renderSeriesList();
+      await renderHome();
+    }
+    if (state.coverEdit.imageUrl){
+      URL.revokeObjectURL(state.coverEdit.imageUrl);
+    }
+    state.coverEdit = null;
   });
 
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -1633,6 +1824,7 @@ async function loadAll(){
 
   state.homeSortKey = localStorage.getItem("ct_home_sort_key") || state.homeSortKey;
   state.homeSortDir = localStorage.getItem("ct_home_sort_dir") || state.homeSortDir;
+  if (!HOME_SORT_KEYS.has(state.homeSortKey)) state.homeSortKey = "updated";
   updateHomeSortControls();
 
   state.series = (await db.getAll("series")).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
