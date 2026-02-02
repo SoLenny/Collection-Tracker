@@ -98,6 +98,7 @@
               <div class="dropzone-sub">Можно загрузить сразу несколько файлов.</div>
             </div>
             <div class="canvas-wrap">
+              <button id="btnViewImage" class="image-view-btn" type="button" title="Открыть изображение">🔍</button>
               <canvas id="canvas" width="1200" height="800"></canvas>
             </div>
 
@@ -179,7 +180,34 @@
     </form>
   </dialog>
 
+  <dialog id="dlgImageViewer" class="dialog dialog-viewer">
+    <div class="viewer-card">
+      <div class="viewer-toolbar">
+        <div class="viewer-title">Просмотр изображения</div>
+        <button id="viewerClose" class="btn ghost tiny" type="button">Закрыть</button>
+      </div>
+      <div id="viewerStage" class="viewer-stage">
+        <img id="viewerImage" alt="Просмотр серии" />
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="dlgCoverPos" class="dialog dialog-cover">
+    <div class="dialog-card cover-dialog">
+      <div class="dialog-title">Позиция обложки</div>
+      <div class="cover-frame" id="coverFrame">
+        <img id="coverFrameImage" alt="Обложка серии" />
+      </div>
+      <div class="dialog-actions">
+        <button id="coverReset" class="btn ghost" type="button">Сбросить</button>
+        <button id="coverCancel" class="btn ghost" type="button">Отмена</button>
+        <button id="coverSave" class="btn primary" type="button">Сохранить</button>
+      </div>
+      <div class="dialog-small">Перетяни изображение, чтобы выбрать видимую область.</div>
+    </div>
+  </dialog>
+
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v4.1.3</div>
+  <div class="version-badge" id="versionBadge">v4.1.5</div>
 </body>
 </html>

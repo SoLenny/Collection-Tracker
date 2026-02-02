@@ -1,4 +1,4 @@
-const VERSION = "v4.1.3";
+const VERSION = "v4.1.5";
 // Collection Tracker v4
 // - Home page with series cards + progress (received/total)
 // - Series page: multiple images per series (Часть N)
@@ -143,6 +143,7 @@ const els = {
 
   dropzone: $("#dropzone"),
   seriesLeftcol: $("#seriesLeftcol"),
+  btnViewImage: $("#btnViewImage"),
 
   cardsList: $("#cardsList"),
 
@@ -153,6 +154,18 @@ const els = {
   confirmTitle: $("#confirmTitle"),
   confirmText: $("#confirmText"),
   confirmOk: $("#confirmOk"),
+
+  dlgImageViewer: $("#dlgImageViewer"),
+  viewerStage: $("#viewerStage"),
+  viewerImage: $("#viewerImage"),
+  viewerClose: $("#viewerClose"),
+
+  dlgCoverPos: $("#dlgCoverPos"),
+  coverFrame: $("#coverFrame"),
+  coverFrameImage: $("#coverFrameImage"),
+  coverReset: $("#coverReset"),
+  coverCancel: $("#coverCancel"),
+  coverSave: $("#coverSave"),
 
   canvas: $("#canvas"),
 };
@@ -176,6 +189,18 @@ let state = {
 
   drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
   imageByPart: new Map(),
+  coverEditor: {
+    seriesId: null,
+    pos: {x:50, y:50},
+    dragging: false,
+    startX: 0,
+    startY: 0,
+    startOffsetX: 0,
+    startOffsetY: 0,
+    maxX: 0,
+    maxY: 0,
+    url: null,
+  },
 };
 
 function uid(prefix="id"){ return `${prefix}_${crypto.randomUUID()}`; }
@@ -198,6 +223,18 @@ function bestOverlap(r, cards){
   return best;
 }
 function seriesDisplayName(name){ return (name && name.trim()) ? name.trim() : "Без названия"; }
+function getSeriesCoverPos(series){
+  const rawX = Number(series?.coverPos?.x);
+  const rawY = Number(series?.coverPos?.y);
+  return {
+    x: clamp(Number.isFinite(rawX) ? rawX : 50, 0, 100),
+    y: clamp(Number.isFinite(rawY) ? rawY : 50, 0, 100),
+  };
+}
+function applyCoverPosition(img, series){
+  const pos = getSeriesCoverPos(series);
+  img.style.objectPosition = `${pos.x}% ${pos.y}%`;
+}
 
 function humanStats(cards){
   const total = cards.length;
@@ -315,7 +352,18 @@ function renderSeriesList(){
     sub.appendChild(badge);
 
     info.append(nameRow, sub);
-    item.append(thumb, info);
+    const delBtn = document.createElement("button");
+    delBtn.className = "series-delete";
+    delBtn.type = "button";
+    delBtn.title = "Удалить серию";
+    delBtn.textContent = "✕";
+    delBtn.addEventListener("click", async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      await deleteSeriesById(s.id);
+    });
+
+    item.append(thumb, info, delBtn);
 
     // Open
     item.addEventListener("click", () => openSeries(s.id));
@@ -329,6 +377,7 @@ function renderSeriesList(){
       const img = new Image();
       img.src = url;
       img.onload = () => URL.revokeObjectURL(url);
+      applyCoverPosition(img, s);
       thumb.innerHTML = "";
       thumb.appendChild(img);
     })();
@@ -350,7 +399,14 @@ function escapeHtml(str){
 
 async function seriesPreviewBlob(seriesId){
   const parts = (await db.getAllByIndex("parts","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
-  return parts[0]?.imageBlob || null;
+  if (!parts.length) return null;
+  const series = state.series.find(s=>s.id===seriesId);
+  let part = null;
+  if (series?.coverPartId){
+    part = parts.find(p=>p.id===series.coverPartId) || null;
+  }
+  if (!part) part = parts[0];
+  return part?.imageBlob || null;
 }
 
 /* ---------- Home ---------- */
@@ -371,6 +427,34 @@ async function renderHome(){
     thumb.className = "home-thumb";
     thumb.innerHTML = `<div class="ph">✦</div>`;
 
+    const actions = document.createElement("div");
+    actions.className = "home-actions";
+
+    const btnRefresh = document.createElement("button");
+    btnRefresh.className = "home-action";
+    btnRefresh.type = "button";
+    btnRefresh.title = "Обновить обложку (Часть 1)";
+    btnRefresh.textContent = "⟳";
+    btnRefresh.addEventListener("click", async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      await refreshSeriesCover(s.id);
+    });
+
+    const btnEdit = document.createElement("button");
+    btnEdit.className = "home-action";
+    btnEdit.type = "button";
+    btnEdit.title = "Позиция обложки";
+    btnEdit.textContent = "✎";
+    btnEdit.addEventListener("click", async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      await openCoverEditor(s.id, thumb);
+    });
+
+    actions.append(btnRefresh, btnEdit);
+    thumb.appendChild(actions);
+
     (async () => {
       const blob = await seriesPreviewBlob(s.id);
       if (!blob) return;
@@ -378,7 +462,9 @@ async function renderHome(){
       const img = new Image();
       img.src = url;
       img.onload = () => URL.revokeObjectURL(url);
+      applyCoverPosition(img, s);
       thumb.innerHTML = "";
+      thumb.appendChild(actions);
       thumb.appendChild(img);
     })();
 
@@ -505,10 +591,16 @@ function updateDropzoneVisibility(){
 async function loadActivePartImage(){
   if (state.imageURL){ URL.revokeObjectURL(state.imageURL); state.imageURL=null; }
   state.image = null;
-  if (!state.activePartId) return;
+  if (!state.activePartId){
+    updateViewerButtonState();
+    return;
+  }
 
   const p = state.parts.find(x=>x.id===state.activePartId);
-  if (!p || !p.imageBlob) return;
+  if (!p || !p.imageBlob){
+    updateViewerButtonState();
+    return;
+  }
   const url = URL.createObjectURL(p.imageBlob);
   state.imageURL = url;
   const img = new Image();
@@ -516,6 +608,14 @@ async function loadActivePartImage(){
   img.src = url;
   await img.decode().catch(()=>{});
   state.image = img;
+  updateViewerButtonState();
+}
+
+function updateViewerButtonState(){
+  if (!els.btnViewImage) return;
+  const hasImage = !!state.image;
+  els.btnViewImage.disabled = !hasImage;
+  els.btnViewImage.classList.toggle("is-disabled", !hasImage);
 }
 
 async function addPartFromFile(file){
@@ -564,6 +664,238 @@ async function addPartsFromFiles(files){
   }
   updatePartsUIVisibility();
   updateDropzoneVisibility();
+}
+
+async function refreshSeriesCover(seriesId){
+  const parts = (await db.getAllByIndex("parts","seriesId", seriesId)).sort((a,b)=>a.index-b.index);
+  const part = parts[0];
+  if (!part) return;
+  const s = state.series.find(x=>x.id===seriesId);
+  if (!s) return;
+  s.coverPartId = part.id;
+  s.updatedAt = Date.now();
+  await db.put("series", s);
+  state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  renderSeriesList();
+  await renderHome();
+}
+
+async function openCoverEditor(seriesId, thumbEl){
+  const s = state.series.find(x=>x.id===seriesId);
+  if (!s) return;
+  const blob = await seriesPreviewBlob(seriesId);
+  if (!blob) return;
+  const rect = thumbEl?.getBoundingClientRect();
+  if (rect?.width && rect?.height){
+    els.coverFrame.style.aspectRatio = `${rect.width / rect.height}`;
+  } else {
+    els.coverFrame.style.aspectRatio = "3 / 1.4";
+  }
+
+  if (state.coverEditor.url){
+    URL.revokeObjectURL(state.coverEditor.url);
+  }
+  const url = URL.createObjectURL(blob);
+  state.coverEditor.url = url;
+  state.coverEditor.seriesId = seriesId;
+  state.coverEditor.pos = getSeriesCoverPos(s);
+  applyCoverEditorPosition();
+  els.coverFrameImage.src = url;
+  els.coverFrameImage.onload = () => {
+    applyCoverEditorPosition();
+    updateCoverEditorBounds();
+  };
+  if (els.coverFrameImage.complete){
+    applyCoverEditorPosition();
+    updateCoverEditorBounds();
+  }
+  els.dlgCoverPos.showModal();
+}
+
+function updateCoverEditorBounds(){
+  const img = els.coverFrameImage;
+  const frameRect = els.coverFrame.getBoundingClientRect();
+  const natW = img.naturalWidth || 0;
+  const natH = img.naturalHeight || 0;
+  if (!frameRect.width || !frameRect.height || !natW || !natH) return;
+  const scale = Math.max(frameRect.width / natW, frameRect.height / natH);
+  const scaledW = natW * scale;
+  const scaledH = natH * scale;
+  state.coverEditor.maxX = Math.max(0, scaledW - frameRect.width);
+  state.coverEditor.maxY = Math.max(0, scaledH - frameRect.height);
+}
+
+function coverPosToOffset(pos, max){
+  if (!max) return 0;
+  return -max * (pos / 100);
+}
+
+function offsetToCoverPos(offset, max){
+  if (!max) return 50;
+  return clamp((-offset / max) * 100, 0, 100);
+}
+
+function applyCoverEditorPosition(){
+  els.coverFrameImage.style.objectPosition = `${state.coverEditor.pos.x}% ${state.coverEditor.pos.y}%`;
+}
+
+function startCoverDrag(evt){
+  if (!state.coverEditor.seriesId) return;
+  updateCoverEditorBounds();
+  const { maxX, maxY } = state.coverEditor;
+  state.coverEditor.dragging = true;
+  state.coverEditor.startX = evt.clientX;
+  state.coverEditor.startY = evt.clientY;
+  state.coverEditor.startOffsetX = coverPosToOffset(state.coverEditor.pos.x, maxX);
+  state.coverEditor.startOffsetY = coverPosToOffset(state.coverEditor.pos.y, maxY);
+  els.coverFrame.setPointerCapture(evt.pointerId);
+}
+
+function moveCoverDrag(evt){
+  if (!state.coverEditor.dragging) return;
+  const { maxX, maxY } = state.coverEditor;
+  const dx = evt.clientX - state.coverEditor.startX;
+  const dy = evt.clientY - state.coverEditor.startY;
+  const nextOffsetX = clamp(state.coverEditor.startOffsetX + dx, -maxX, 0);
+  const nextOffsetY = clamp(state.coverEditor.startOffsetY + dy, -maxY, 0);
+  state.coverEditor.pos.x = offsetToCoverPos(nextOffsetX, maxX);
+  state.coverEditor.pos.y = offsetToCoverPos(nextOffsetY, maxY);
+  applyCoverEditorPosition();
+}
+
+function endCoverDrag(evt){
+  if (!state.coverEditor.dragging) return;
+  state.coverEditor.dragging = false;
+  els.coverFrame.releasePointerCapture(evt.pointerId);
+}
+
+async function saveCoverEditor(){
+  const seriesId = state.coverEditor.seriesId;
+  if (!seriesId) return;
+  const s = state.series.find(x=>x.id===seriesId);
+  if (!s) return;
+  s.coverPos = { x: state.coverEditor.pos.x, y: state.coverEditor.pos.y };
+  s.updatedAt = Date.now();
+  await db.put("series", s);
+  state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  renderSeriesList();
+  await renderHome();
+  els.dlgCoverPos.close();
+}
+
+function resetCoverEditor(){
+  state.coverEditor.pos = {x:50, y:50};
+  applyCoverEditorPosition();
+}
+
+async function openActiveImageViewer(){
+  if (!state.activePartId) return;
+  const part = state.parts.find(p=>p.id===state.activePartId);
+  if (!part?.imageBlob) return;
+  if (viewerState.url){
+    URL.revokeObjectURL(viewerState.url);
+    viewerState.url = null;
+  }
+  const url = URL.createObjectURL(part.imageBlob);
+  viewerState.url = url;
+  els.viewerImage.src = url;
+  await els.viewerImage.decode().catch(()=>{});
+  els.dlgImageViewer.showModal();
+  requestAnimationFrame(() => resetViewer());
+}
+
+const viewerState = {
+  zoom: 1,
+  baseScale: 1,
+  panX: 0,
+  panY: 0,
+  dragging: false,
+  startX: 0,
+  startY: 0,
+  startPanX: 0,
+  startPanY: 0,
+  url: null,
+};
+
+function computeViewerBaseScale(){
+  const rect = els.viewerStage.getBoundingClientRect();
+  const img = els.viewerImage;
+  const natW = img.naturalWidth || 0;
+  const natH = img.naturalHeight || 0;
+  if (!rect.width || !rect.height || !natW || !natH){
+    viewerState.baseScale = 1;
+    return;
+  }
+  const scale = Math.min(rect.width / natW, rect.height / natH);
+  viewerState.baseScale = scale;
+}
+
+function clampViewerPan(){
+  const rect = els.viewerStage.getBoundingClientRect();
+  const img = els.viewerImage;
+  const natW = img.naturalWidth || 0;
+  const natH = img.naturalHeight || 0;
+  const scale = viewerState.baseScale * viewerState.zoom;
+  const scaledW = natW * scale;
+  const scaledH = natH * scale;
+  const maxX = Math.max(0, (scaledW - rect.width) / 2);
+  const maxY = Math.max(0, (scaledH - rect.height) / 2);
+  viewerState.panX = clamp(viewerState.panX, -maxX, maxX);
+  viewerState.panY = clamp(viewerState.panY, -maxY, maxY);
+}
+
+function updateViewerTransform(){
+  const scale = viewerState.baseScale * viewerState.zoom;
+  els.viewerImage.style.transform = `translate(${viewerState.panX}px, ${viewerState.panY}px) scale(${scale})`;
+  els.viewerStage.classList.toggle("is-zoomed", viewerState.zoom > 1);
+}
+
+function resetViewer(){
+  computeViewerBaseScale();
+  viewerState.zoom = 1;
+  viewerState.panX = 0;
+  viewerState.panY = 0;
+  updateViewerTransform();
+}
+
+function onViewerWheel(evt){
+  evt.preventDefault();
+  const delta = evt.deltaY;
+  const factor = delta > 0 ? 0.9 : 1.1;
+  viewerState.zoom = clamp(viewerState.zoom * factor, 1, 6);
+  clampViewerPan();
+  updateViewerTransform();
+}
+
+function onViewerPointerDown(evt){
+  if (viewerState.zoom <= 1) return;
+  evt.preventDefault();
+  viewerState.dragging = true;
+  viewerState.startX = evt.clientX;
+  viewerState.startY = evt.clientY;
+  viewerState.startPanX = viewerState.panX;
+  viewerState.startPanY = viewerState.panY;
+  els.viewerStage.setPointerCapture(evt.pointerId);
+}
+
+function onViewerPointerMove(evt){
+  if (!viewerState.dragging) return;
+  const dx = evt.clientX - viewerState.startX;
+  const dy = evt.clientY - viewerState.startY;
+  viewerState.panX = viewerState.startPanX + dx;
+  viewerState.panY = viewerState.startPanY + dy;
+  clampViewerPan();
+  updateViewerTransform();
+}
+
+function onViewerPointerUp(evt){
+  if (!viewerState.dragging) return;
+  viewerState.dragging = false;
+  els.viewerStage.releasePointerCapture(evt.pointerId);
+}
+
+function closeViewer(){
+  els.dlgImageViewer.close();
 }
 
 async function deletePart(partId){
@@ -946,29 +1278,38 @@ async function createSeries(nameRaw){
 }
 
 async function deleteActiveSeries(){
-  const id = state.activeSeriesId;
-  if (!id) return;
-  const s = state.series.find(x=>x.id===id);
+  if (!state.activeSeriesId) return;
+  await deleteSeriesById(state.activeSeriesId);
+}
+
+async function deleteSeriesById(seriesId){
+  const s = state.series.find(x=>x.id===seriesId);
   if (!s) return;
 
-  const ok = await confirmDialog("Удалить серию?", `Серия “${seriesDisplayName(s.name)}” и все её данные будут удалены.`, "Удалить");
+  const ok = await confirmDialog(
+    "Удалить серию?",
+    `Серия “${seriesDisplayName(s.name)}” будет удалена. Это удалит все части, статусы и заметки для этой серии.`,
+    "Удалить"
+  );
   if (!ok) return;
 
-  const cards = await db.getAllByIndex("cards","seriesId", id);
+  const cards = await db.getAllByIndex("cards","seriesId", seriesId);
   for (const c of cards) await db.delete("cards", c.id);
-  const parts = await db.getAllByIndex("parts","seriesId", id);
+  const parts = await db.getAllByIndex("parts","seriesId", seriesId);
   for (const p of parts) await db.delete("parts", p.id);
-  await db.delete("series", id);
+  await db.delete("series", seriesId);
 
-  state.series = state.series.filter(x=>x.id!==id);
-  state.parts = [];
-  state.cards = [];
-  state.activeSeriesId = null;
-  state.activePartId = null;
+  state.series = state.series.filter(x=>x.id!==seriesId);
+  if (state.activeSeriesId === seriesId){
+    state.parts = [];
+    state.cards = [];
+    state.activeSeriesId = null;
+    state.activePartId = null;
+  }
 
   await renderHome();
   renderSeriesList();
-  showHome();
+  if (!state.activeSeriesId) showHome();
 }
 
 async function confirmDialog(title, text, okText="Ок"){
@@ -1374,6 +1715,12 @@ function initEvents(){
   });
   els.btnDeleteSeries.addEventListener("click", deleteActiveSeries);
 
+  els.btnViewImage?.addEventListener("click", async (evt) => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    await openActiveImageViewer();
+  });
+
   els.toggleAllTrade.addEventListener("click", toggleAllFoundTrade);
   els.toggleAllReceived.addEventListener("click", toggleAllReceived);
 
@@ -1382,7 +1729,29 @@ function initEvents(){
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
 
-  window.addEventListener("resize", () => resizeCanvasAndRedraw());
+  els.viewerClose?.addEventListener("click", closeViewer);
+  els.viewerStage?.addEventListener("wheel", onViewerWheel, { passive: false });
+  els.viewerStage?.addEventListener("pointerdown", onViewerPointerDown);
+  els.viewerStage?.addEventListener("pointermove", onViewerPointerMove);
+  els.viewerStage?.addEventListener("pointerup", onViewerPointerUp);
+  els.viewerStage?.addEventListener("pointercancel", onViewerPointerUp);
+
+  els.coverFrame?.addEventListener("pointerdown", (evt) => {
+    evt.preventDefault();
+    startCoverDrag(evt);
+  });
+  els.coverFrame?.addEventListener("pointermove", moveCoverDrag);
+  els.coverFrame?.addEventListener("pointerup", endCoverDrag);
+  els.coverFrame?.addEventListener("pointercancel", endCoverDrag);
+  els.coverReset?.addEventListener("click", resetCoverEditor);
+  els.coverCancel?.addEventListener("click", () => els.dlgCoverPos.close());
+  els.coverSave?.addEventListener("click", saveCoverEditor);
+
+  window.addEventListener("resize", () => {
+    resizeCanvasAndRedraw();
+    if (els.dlgImageViewer?.open) resetViewer();
+    if (els.dlgCoverPos?.open) updateCoverEditorBounds();
+  });
 
   let dragDepth = 0;
   const handleDragEnter = (evt) => {
@@ -1416,7 +1785,26 @@ function initEvents(){
   els.seriesView.addEventListener("dragleave", handleDragLeave);
   els.seriesView.addEventListener("dragover", handleDragOver);
   els.seriesView.addEventListener("drop", handleDrop);
+
+  updateViewerButtonState();
 }
+
+els.dlgImageViewer?.addEventListener("close", () => {
+  if (viewerState.url){
+    URL.revokeObjectURL(viewerState.url);
+    viewerState.url = null;
+  }
+  resetViewer();
+});
+
+els.dlgCoverPos?.addEventListener("close", () => {
+  if (state.coverEditor.url){
+    URL.revokeObjectURL(state.coverEditor.url);
+    state.coverEditor.url = null;
+  }
+  state.coverEditor.seriesId = null;
+  state.coverEditor.dragging = false;
+});
 
 /* ---------- Boot ---------- */
 async function loadAll(){
