@@ -1,4 +1,4 @@
-const VERSION = "v0.4.2.4";
+const VERSION = "v0.4.3.0";
 // Collection Tracker v4.2
 // - Series page: multiple images per collection (flat)
 // - All images visible on the collection screen
@@ -46,6 +46,36 @@ class DB {
         } else {
           const c = req.transaction.objectStore("cards");
           if (!c.indexNames.contains("seriesId")) c.createIndex("seriesId","seriesId",{unique:false});
+          if (!c.indexNames.contains("updatedAt")) c.createIndex("updatedAt","updatedAt",{unique:false});
+        }
+
+        if (!db.objectStoreNames.contains("collections")) {
+          const c = db.createObjectStore("collections", { keyPath: "id" });
+          c.createIndex("updatedAt", "updatedAt", { unique:false });
+        } else {
+          const c = req.transaction.objectStore("collections");
+          if (!c.indexNames.contains("updatedAt")) c.createIndex("updatedAt","updatedAt",{unique:false});
+        }
+
+        if (!db.objectStoreNames.contains("collectionImages")) {
+          const i = db.createObjectStore("collectionImages", { keyPath: "id" });
+          i.createIndex("collectionId", "collectionId", { unique:false });
+          i.createIndex("collectionId_index", ["collectionId","index"], { unique:false });
+          i.createIndex("updatedAt", "updatedAt", { unique:false });
+        } else {
+          const i = req.transaction.objectStore("collectionImages");
+          if (!i.indexNames.contains("collectionId")) i.createIndex("collectionId","collectionId",{unique:false});
+          if (!i.indexNames.contains("collectionId_index")) i.createIndex("collectionId_index",["collectionId","index"],{unique:false});
+          if (!i.indexNames.contains("updatedAt")) i.createIndex("updatedAt","updatedAt",{unique:false});
+        }
+
+        if (!db.objectStoreNames.contains("collectionItems")) {
+          const c = db.createObjectStore("collectionItems", { keyPath: "id" });
+          c.createIndex("collectionId", "collectionId", { unique:false });
+          c.createIndex("updatedAt", "updatedAt", { unique:false });
+        } else {
+          const c = req.transaction.objectStore("collectionItems");
+          if (!c.indexNames.contains("collectionId")) c.createIndex("collectionId","collectionId",{unique:false});
           if (!c.indexNames.contains("updatedAt")) c.createIndex("updatedAt","updatedAt",{unique:false});
         }
       };
@@ -109,12 +139,13 @@ class DB {
   }
 }
 
-const db = new DB("collection_tracker_v1", 3);
+const db = new DB("collection_tracker_v1", 4);
 
 /* ---------- UI refs ---------- */
 const els = {
   btnHome: $("#btnHome"),
   btnHomeBrand: $("#btnHomeBrand"),
+  btnCollections: $("#btnCollections"),
   btnExport: $("#btnExport"),
   fileImport: $("#fileImport"),
   btnAbout: $("#btnAbout"),
@@ -151,6 +182,27 @@ const els = {
   dlgNewSeries: $("#dlgNewSeries"),
   newSeriesName: $("#newSeriesName"),
 
+  collectionsView: $("#collectionsView"),
+  collectionsListView: $("#collectionsListView"),
+  collectionsGrid: $("#collectionsGrid"),
+  collectionsEmpty: $("#collectionsEmpty"),
+  collectionsCount: $("#collectionsCount"),
+  btnNewCollection: $("#btnNewCollection"),
+  btnNewCollection2: $("#btnNewCollection2"),
+  dlgNewCollection: $("#dlgNewCollection"),
+  newCollectionName: $("#newCollectionName"),
+
+  collectionDetailView: $("#collectionDetailView"),
+  btnBackToCollections: $("#btnBackToCollections"),
+  collectionName: $("#collectionName"),
+  btnDeleteCollection: $("#btnDeleteCollection"),
+  collectionImagesInput: $("#collectionImagesInput"),
+  collectionGallery: $("#collectionGallery"),
+  collectionItemsGrid: $("#collectionItemsGrid"),
+  collectionItemName: $("#collectionItemName"),
+  collectionItemStatus: $("#collectionItemStatus"),
+  btnAddCollectionItem: $("#btnAddCollectionItem"),
+
   dlgConfirm: $("#dlgConfirm"),
   confirmTitle: $("#confirmTitle"),
   confirmText: $("#confirmText"),
@@ -185,6 +237,15 @@ let state = {
   cards: [],
   allCards: [],
   cardsBySeriesId: new Map(),
+
+  collections: [],
+  activeCollectionId: null,
+  collectionImages: [],
+  collectionItems: [],
+  allCollectionItems: [],
+  collectionItemsByCollectionId: new Map(),
+  collectionImageUrls: new Map(),
+  collectionThumbUrls: new Map(),
 
   statusFilter: "all",
   seriesSearch: "",
@@ -223,6 +284,33 @@ function buildCardsCache(cards){
       state.cardsBySeriesId.set(card.seriesId, [card]);
     }
   }
+}
+
+function buildCollectionItemsCache(items){
+  state.allCollectionItems = items;
+  state.collectionItemsByCollectionId = new Map();
+  for (const item of items){
+    const bucket = state.collectionItemsByCollectionId.get(item.collectionId);
+    if (bucket){
+      bucket.push(item);
+    } else {
+      state.collectionItemsByCollectionId.set(item.collectionId, [item]);
+    }
+  }
+}
+
+function syncCollectionItemsCacheForCollection(collectionId, items){
+  state.allCollectionItems = state.allCollectionItems.filter(item => item.collectionId !== collectionId).concat(items);
+  state.collectionItemsByCollectionId.set(collectionId, items);
+}
+
+function removeCollectionItemsFromCache(collectionId){
+  state.allCollectionItems = state.allCollectionItems.filter(item => item.collectionId !== collectionId);
+  state.collectionItemsByCollectionId.delete(collectionId);
+}
+
+function getCollectionItemsForCollection(collectionId){
+  return state.collectionItemsByCollectionId.get(collectionId) || [];
 }
 
 function syncCardsCacheForSeries(seriesId, cards){
@@ -283,6 +371,13 @@ const CARD_PREVIEW_PLACEHOLDER = "data:image/svg+xml;charset=utf-8," + encodeURI
     <text x="70" y="58" text-anchor="middle" font-size="22" fill="rgba(255,255,255,0.8)">✦</text>
   </svg>`
 );
+
+const COLLECTION_STATUS_LABELS = {
+  planned: "Запланировано",
+  searching: "Ищу",
+  owned: "В коллекции",
+  duplicate: "Дубликат",
+};
 
 function clampZoom(value){
   return clamp(Number(value) || 1, CROP_ZOOM_MIN, CROP_ZOOM_MAX);
@@ -631,20 +726,51 @@ async function migrateIfNeeded(){
 }
 
 /* ---------- Views ---------- */
+function setActiveSection(section){
+  localStorage.setItem("ct_active_section", section);
+}
+
 function showHome(){
   els.seriesView.classList.add("hidden");
+  els.collectionsView.classList.add("hidden");
+  els.collectionDetailView.classList.add("hidden");
+  els.collectionsListView.classList.remove("hidden");
   els.homeView.classList.remove("hidden");
   state.activeSeriesId = null;
   state.activeImageId = null;
   state.images = [];
+  state.activeCollectionId = null;
+  state.collectionImages = [];
+  state.collectionItems = [];
+  clearCollectionGalleryUrls();
   clearImageBlocks();
   localStorage.removeItem("ct_last_series");
+  localStorage.removeItem("ct_last_collection");
+  setActiveSection("home");
   renderSeriesList();
   renderHome();
 }
 function showSeries(){
   els.homeView.classList.add("hidden");
+  els.collectionsView.classList.add("hidden");
+  els.collectionDetailView.classList.add("hidden");
   els.seriesView.classList.remove("hidden");
+  clearCollectionGalleryUrls();
+  setActiveSection("series");
+}
+
+function showCollections(){
+  els.homeView.classList.add("hidden");
+  els.seriesView.classList.add("hidden");
+  els.collectionsView.classList.remove("hidden");
+  if (state.activeCollectionId){
+    els.collectionsListView.classList.add("hidden");
+    els.collectionDetailView.classList.remove("hidden");
+  } else {
+    els.collectionsListView.classList.remove("hidden");
+    els.collectionDetailView.classList.add("hidden");
+  }
+  setActiveSection("collections");
 }
 
 /* ---------- Rendering: sidebar series list ---------- */
@@ -873,6 +999,190 @@ async function renderHome(){
   }
 }
 
+function clearCollectionThumbs(){
+  for (const url of state.collectionThumbUrls.values()){
+    URL.revokeObjectURL(url);
+  }
+  state.collectionThumbUrls.clear();
+}
+
+function clearCollectionGalleryUrls(){
+  for (const url of state.collectionImageUrls.values()){
+    URL.revokeObjectURL(url);
+  }
+  state.collectionImageUrls.clear();
+}
+
+async function getCollectionCoverImage(collectionId){
+  const images = (await db.getAllByIndex("collectionImages", "collectionId", collectionId))
+    .sort((a,b)=>(a.index||0)-(b.index||0));
+  return images[0] || null;
+}
+
+async function renderCollectionsGrid(){
+  if (!els.collectionsGrid) return;
+  clearCollectionThumbs();
+  els.collectionsGrid.innerHTML = "";
+  if (els.collectionsCount){
+    els.collectionsCount.textContent = `Коллекций: ${state.collections.length}`;
+  }
+  if (!state.collections.length){
+    els.collectionsEmpty.classList.remove("hidden");
+    return;
+  }
+  els.collectionsEmpty.classList.add("hidden");
+
+  const ordered = state.collections.slice().sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  for (const collection of ordered){
+    const cardEl = document.createElement("div");
+    cardEl.className = "collection-card";
+    cardEl.dataset.id = collection.id;
+
+    const thumb = document.createElement("div");
+    thumb.className = "collection-thumb";
+    thumb.innerHTML = `<div class="ph">✦</div>`;
+
+    const cover = await getCollectionCoverImage(collection.id);
+    if (cover?.imageBlob){
+      const url = URL.createObjectURL(cover.imageBlob);
+      state.collectionThumbUrls.set(collection.id, url);
+      const img = new Image();
+      img.src = url;
+      thumb.innerHTML = "";
+      thumb.appendChild(img);
+    }
+
+    const body = document.createElement("div");
+    body.className = "collection-body";
+    const name = document.createElement("div");
+    name.className = "collection-name-text";
+    name.textContent = seriesDisplayName(collection.name);
+
+    const items = getCollectionItemsForCollection(collection.id);
+    const total = items.length;
+    const checked = items.reduce((acc, item) => acc + (item.checked ? 1 : 0), 0);
+
+    const meta = document.createElement("div");
+    meta.className = "collection-meta";
+    meta.innerHTML = `<span>${checked}/${total} отмечено</span><span>${collection.updatedAt ? "обновлено" : "новая"}</span>`;
+
+    body.append(name, meta);
+    cardEl.append(thumb, body);
+    cardEl.addEventListener("click", () => openCollection(collection.id));
+    els.collectionsGrid.appendChild(cardEl);
+  }
+}
+
+async function renderCollectionGallery(){
+  if (!els.collectionGallery) return;
+  clearCollectionGalleryUrls();
+  els.collectionGallery.innerHTML = "";
+  if (!state.collectionImages.length){
+    els.collectionGallery.innerHTML = `<div class="hint-small">Добавь изображения коллекции, чтобы увидеть галерею.</div>`;
+    return;
+  }
+  for (const image of state.collectionImages){
+    const item = document.createElement("div");
+    item.className = "collection-gallery-item";
+    const img = new Image();
+    if (image.imageBlob){
+      const url = URL.createObjectURL(image.imageBlob);
+      state.collectionImageUrls.set(image.id, url);
+      img.src = url;
+    }
+    item.appendChild(img);
+
+    const actions = document.createElement("div");
+    actions.className = "collection-gallery-actions";
+    const del = document.createElement("button");
+    del.className = "btn ghost danger";
+    del.type = "button";
+    del.textContent = "×";
+    del.setAttribute("aria-label", "Удалить изображение коллекции");
+    del.addEventListener("click", async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      await deleteCollectionImage(image.id);
+    });
+    actions.appendChild(del);
+    item.appendChild(actions);
+    els.collectionGallery.appendChild(item);
+  }
+}
+
+function renderCollectionItemsGrid(){
+  if (!els.collectionItemsGrid) return;
+  els.collectionItemsGrid.innerHTML = "";
+  if (!state.collectionItems.length){
+    els.collectionItemsGrid.innerHTML = `<div class="hint-small">Добавь предметы, чтобы отмечать их статусы.</div>`;
+    return;
+  }
+  for (const item of state.collectionItems){
+    const card = document.createElement("div");
+    card.className = "collection-item-card";
+    card.dataset.id = item.id;
+
+    const head = document.createElement("div");
+    head.className = "collection-item-head";
+    const title = document.createElement("div");
+    title.className = "collection-item-title";
+    title.textContent = item.title || "Без названия";
+
+    const actions = document.createElement("div");
+    actions.className = "collection-item-actions";
+    const del = document.createElement("button");
+    del.className = "btn ghost danger";
+    del.type = "button";
+    del.textContent = "×";
+    del.setAttribute("aria-label", "Удалить предмет");
+    del.addEventListener("click", async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      await deleteCollectionItem(item.id);
+    });
+    actions.appendChild(del);
+    head.append(title, actions);
+
+    const controls = document.createElement("div");
+    controls.className = "collection-item-controls";
+    const checkLabel = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(item.checked);
+    checkbox.addEventListener("change", async () => {
+      item.checked = checkbox.checked;
+      item.updatedAt = Date.now();
+      await db.put("collectionItems", item);
+      syncCollectionItemsCacheForCollection(item.collectionId, state.collectionItems);
+      await touchCollectionUpdated();
+    });
+    const checkText = document.createElement("span");
+    checkText.textContent = "Отмечено";
+    checkLabel.append(checkbox, checkText);
+
+    const status = document.createElement("select");
+    for (const [value, label] of Object.entries(COLLECTION_STATUS_LABELS)){
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      status.appendChild(opt);
+    }
+    status.value = item.status || "planned";
+    status.addEventListener("change", async () => {
+      item.status = status.value;
+      item.updatedAt = Date.now();
+      await db.put("collectionItems", item);
+      syncCollectionItemsCacheForCollection(item.collectionId, state.collectionItems);
+      await touchCollectionUpdated();
+    });
+
+    controls.append(checkLabel, status);
+
+    card.append(head, controls);
+    els.collectionItemsGrid.appendChild(card);
+  }
+}
+
 /* ---------- Open series ---------- */
 async function openSeries(seriesId){
   const s = state.series.find(x=>x.id===seriesId);
@@ -912,6 +1222,167 @@ async function openSeries(seriesId){
   await renderImageBlocks();
   refreshStatsAndRender();
   window.scrollTo({top:0, behavior:"smooth"});
+}
+
+/* ---------- Collections ---------- */
+async function openCollection(collectionId){
+  const collection = state.collections.find(x=>x.id===collectionId);
+  if (!collection) return;
+  state.activeCollectionId = collectionId;
+  localStorage.setItem("ct_last_collection", collectionId);
+  showCollections();
+  els.collectionsListView.classList.add("hidden");
+  els.collectionDetailView.classList.remove("hidden");
+
+  els.collectionName.value = collection.name || "";
+
+  state.collectionImages = (await db.getAllByIndex("collectionImages","collectionId", collectionId))
+    .sort((a,b)=>(a.index||0)-(b.index||0));
+  let imageChanged = false;
+  for (let i=0; i<state.collectionImages.length; i++){
+    const img = state.collectionImages[i];
+    if (!img.index){
+      img.index = i + 1;
+      img.updatedAt = Date.now();
+      await db.put("collectionImages", img);
+      imageChanged = true;
+    }
+  }
+  if (imageChanged){
+    state.collectionImages.sort((a,b)=>(a.index||0)-(b.index||0));
+  }
+
+  state.collectionItems = (await db.getAllByIndex("collectionItems","collectionId", collectionId))
+    .sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+  for (const item of state.collectionItems){
+    let itemChanged = false;
+    if (!item.status){
+      item.status = "planned";
+      itemChanged = true;
+    }
+    if (item.checked === undefined){
+      item.checked = false;
+      itemChanged = true;
+    }
+    if (itemChanged){
+      item.updatedAt = Date.now();
+      await db.put("collectionItems", item);
+    }
+  }
+  syncCollectionItemsCacheForCollection(collectionId, state.collectionItems);
+
+  await renderCollectionsGrid();
+  await renderCollectionGallery();
+  renderCollectionItemsGrid();
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+function closeCollectionDetail(){
+  state.activeCollectionId = null;
+  state.collectionImages = [];
+  state.collectionItems = [];
+  clearCollectionGalleryUrls();
+  localStorage.removeItem("ct_last_collection");
+  els.collectionDetailView.classList.add("hidden");
+  els.collectionsListView.classList.remove("hidden");
+  renderCollectionsGrid();
+}
+
+async function createCollection(name){
+  const collection = {
+    id: uid("collection"),
+    name: limitText(name, 60).trim(),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await db.put("collections", collection);
+  state.collections.unshift(collection);
+  await renderCollectionsGrid();
+  await openCollection(collection.id);
+}
+
+async function deleteCollectionById(id){
+  const collection = state.collections.find(x=>x.id===id);
+  if (!collection) return;
+  const ok = await confirmDialog("Удалить коллекцию?", `Коллекция “${seriesDisplayName(collection.name)}” и все её данные будут удалены.`, "Удалить");
+  if (!ok) return;
+
+  const images = await db.getAllByIndex("collectionImages","collectionId", id);
+  for (const img of images) await db.delete("collectionImages", img.id);
+  const items = await db.getAllByIndex("collectionItems","collectionId", id);
+  for (const item of items) await db.delete("collectionItems", item.id);
+  await db.delete("collections", id);
+
+  if (state.activeCollectionId === id){
+    closeCollectionDetail();
+  }
+  state.collections = state.collections.filter(x=>x.id!==id);
+  removeCollectionItemsFromCache(id);
+  await renderCollectionsGrid();
+}
+
+async function addCollectionImagesFromFiles(files){
+  if (!state.activeCollectionId) return;
+  const startIndex = state.collectionImages.length;
+  const added = [];
+  for (let i=0; i<files.length; i++){
+    const file = files[i];
+    const image = {
+      id: uid("collection_image"),
+      collectionId: state.activeCollectionId,
+      index: startIndex + i + 1,
+      imageBlob: file,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await db.put("collectionImages", image);
+    added.push(image);
+  }
+  state.collectionImages = state.collectionImages.concat(added);
+  await renderCollectionGallery();
+  await touchCollectionUpdated();
+}
+
+async function deleteCollectionImage(imageId){
+  const image = state.collectionImages.find(img => img.id === imageId);
+  if (!image) return;
+  await db.delete("collectionImages", imageId);
+  state.collectionImages = state.collectionImages.filter(img => img.id !== imageId);
+  clearCollectionGalleryUrls();
+  await renderCollectionGallery();
+  await touchCollectionUpdated();
+}
+
+async function addCollectionItem(){
+  if (!state.activeCollectionId) return;
+  const title = limitText(els.collectionItemName.value, 80).trim();
+  if (!title) return;
+  const status = els.collectionItemStatus.value || "planned";
+  const item = {
+    id: uid("collection_item"),
+    collectionId: state.activeCollectionId,
+    title,
+    status,
+    checked: false,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await db.put("collectionItems", item);
+  state.collectionItems.push(item);
+  syncCollectionItemsCacheForCollection(state.activeCollectionId, state.collectionItems);
+  els.collectionItemName.value = "";
+  renderCollectionItemsGrid();
+  await touchCollectionUpdated();
+}
+
+async function deleteCollectionItem(itemId){
+  const item = state.collectionItems.find(x=>x.id===itemId);
+  if (!item) return;
+  await db.delete("collectionItems", itemId);
+  state.collectionItems = state.collectionItems.filter(x=>x.id!==itemId);
+  syncCollectionItemsCacheForCollection(item.collectionId, state.collectionItems);
+  renderCollectionItemsGrid();
+  await touchCollectionUpdated();
 }
 
 function updateDropzoneVisibility(){
@@ -1900,6 +2371,15 @@ async function touchSeriesUpdated(){
   await renderHome();
 }
 
+async function touchCollectionUpdated(){
+  const collection = state.collections.find(x=>x.id===state.activeCollectionId);
+  if (!collection) return;
+  collection.updatedAt = Date.now();
+  await db.put("collections", collection);
+  state.collections.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  await renderCollectionsGrid();
+}
+
 function refreshStatsAndRender(){
   renderStats();
   renderCardsList();
@@ -2072,6 +2552,9 @@ async function exportData(){
   const series = await db.getAll("series");
   const images = await db.getAll("images");
   const cards = await db.getAll("cards");
+  const collections = await db.getAll("collections");
+  const collectionImages = await db.getAll("collectionImages");
+  const collectionItems = await db.getAll("collectionItems");
 
   const imagesPortable = [];
   for (const image of images){
@@ -2082,7 +2565,27 @@ async function exportData(){
     }
     imagesPortable.push(copy);
   }
-  const payload = { version: 5, exportedAt: new Date().toISOString(), series, images: imagesPortable, cards };
+
+  const collectionImagesPortable = [];
+  for (const image of collectionImages){
+    const copy = {...image};
+    if (copy.imageBlob){
+      copy.imageBase64 = await blobToDataURL(copy.imageBlob);
+      delete copy.imageBlob;
+    }
+    collectionImagesPortable.push(copy);
+  }
+
+  const payload = {
+    version: 6,
+    exportedAt: new Date().toISOString(),
+    series,
+    images: imagesPortable,
+    cards,
+    collections,
+    collectionImages: collectionImagesPortable,
+    collectionItems,
+  };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -2105,6 +2608,9 @@ async function importData(file){
   await db.clear("cards");
   await db.clear("images");
   await db.clear("series");
+  await db.clear("collectionItems");
+  await db.clear("collectionImages");
+  await db.clear("collections");
 
   for (const s of data.series){
     const copy = {...s};
@@ -2131,6 +2637,28 @@ async function importData(file){
     if (!c.imageId && c.partId) c.imageId = c.partId;
     if (c.partId !== undefined) delete c.partId;
     await db.put("cards", c);
+  }
+
+  const incomingCollections = Array.isArray(data.collections) ? data.collections : [];
+  for (const collection of incomingCollections){
+    await db.put("collections", collection);
+  }
+  const incomingCollectionImages = Array.isArray(data.collectionImages) ? data.collectionImages : [];
+  for (const img of incomingCollectionImages){
+    const copy = {...img};
+    if (copy.imageBase64){
+      copy.imageBlob = dataURLToBlob(copy.imageBase64);
+      delete copy.imageBase64;
+    }
+    if (copy.id){
+      await db.put("collectionImages", copy);
+    }
+  }
+  const incomingCollectionItems = Array.isArray(data.collectionItems) ? data.collectionItems : [];
+  for (const item of incomingCollectionItems){
+    if (!item.status) item.status = "planned";
+    if (item.checked === undefined) item.checked = false;
+    await db.put("collectionItems", item);
   }
   await loadAll();
 }
@@ -2329,6 +2857,11 @@ function initEvents(){
   setupImageViewer();
   els.btnHome.addEventListener("click", showHome);
   els.btnHomeBrand.addEventListener("click", showHome);
+  els.btnCollections.addEventListener("click", () => {
+    state.activeCollectionId = null;
+    showCollections();
+    renderCollectionsGrid();
+  });
 
   const openNewSeries = () => {
     els.newSeriesName.value = "";
@@ -2342,6 +2875,19 @@ function initEvents(){
   els.dlgNewSeries.addEventListener("close", async () => {
     if (els.dlgNewSeries.returnValue !== "ok") return;
     await createSeries(els.newSeriesName.value);
+  });
+
+  const openNewCollection = () => {
+    els.newCollectionName.value = "";
+    els.dlgNewCollection.showModal();
+    setTimeout(()=>els.newCollectionName.focus(), 50);
+  };
+  els.btnNewCollection.addEventListener("click", openNewCollection);
+  els.btnNewCollection2.addEventListener("click", openNewCollection);
+
+  els.dlgNewCollection.addEventListener("close", async () => {
+    if (els.dlgNewCollection.returnValue !== "ok") return;
+    await createCollection(els.newCollectionName.value);
   });
 
   els.btnAbout.addEventListener("click", () => els.dlgAbout.showModal());
@@ -2363,6 +2909,16 @@ function initEvents(){
     await db.put("series", s);
     renderSeriesList();
     await renderHome();
+  });
+
+  els.collectionName.addEventListener("input", async () => {
+    const collection = state.collections.find(x=>x.id===state.activeCollectionId);
+    if (!collection) return;
+    els.collectionName.value = limitText(els.collectionName.value, 60);
+    collection.name = els.collectionName.value;
+    collection.updatedAt = Date.now();
+    await db.put("collections", collection);
+    renderCollectionsGrid();
   });
 
   els.seriesSearch.addEventListener("input", () => {
@@ -2396,6 +2952,30 @@ function initEvents(){
 
   els.btnUndo.addEventListener("click", undoLastSelection);
   els.btnDeleteSeries.addEventListener("click", deleteActiveSeries);
+  els.btnDeleteCollection.addEventListener("click", async () => {
+    if (!state.activeCollectionId) return;
+    await deleteCollectionById(state.activeCollectionId);
+  });
+  els.btnBackToCollections.addEventListener("click", () => {
+    closeCollectionDetail();
+    showCollections();
+  });
+
+  els.collectionImagesInput.addEventListener("change", async () => {
+    if (!els.collectionImagesInput.files?.length) return;
+    await addCollectionImagesFromFiles(els.collectionImagesInput.files);
+    els.collectionImagesInput.value = "";
+  });
+
+  els.btnAddCollectionItem.addEventListener("click", () => {
+    addCollectionItem();
+  });
+  els.collectionItemName.addEventListener("keydown", (evt) => {
+    if (evt.key === "Enter"){
+      evt.preventDefault();
+      addCollectionItem();
+    }
+  });
 
   els.masterTrade.addEventListener("change", () => {
     setAllFoundTrade(els.masterTrade.checked);
@@ -2587,12 +3167,27 @@ async function loadAll(){
   renderSeriesList();
   await renderHome();
 
-  const last = localStorage.getItem("ct_last_series");
-  if (last && state.series.some(s=>s.id===last)){
-    await openSeries(last);
-  } else {
-    showHome();
+  state.collections = (await db.getAll("collections")).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  buildCollectionItemsCache(await db.getAll("collectionItems"));
+  await renderCollectionsGrid();
+
+  const activeSection = localStorage.getItem("ct_active_section") || "home";
+  const lastSeries = localStorage.getItem("ct_last_series");
+  const lastCollection = localStorage.getItem("ct_last_collection");
+  if (activeSection === "series" && lastSeries && state.series.some(s=>s.id===lastSeries)){
+    await openSeries(lastSeries);
+    return;
   }
+  if (activeSection === "collections" && lastCollection && state.collections.some(c=>c.id===lastCollection)){
+    await openCollection(lastCollection);
+    return;
+  }
+  if (activeSection === "collections"){
+    showCollections();
+    await renderCollectionsGrid();
+    return;
+  }
+  showHome();
 }
 
 function registerSW(){
