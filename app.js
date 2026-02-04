@@ -1,4 +1,4 @@
-const VERSION = "v4.2.2";
+const VERSION = "v0.4.2.3";
 // Collection Tracker v4.2
 // - Series page: multiple images per collection (flat)
 // - All images visible on the collection screen
@@ -131,6 +131,7 @@ const els = {
   homeEmpty: $("#homeEmpty"),
   homeSortKey: $("#homeSortKey"),
   homeSortDir: $("#homeSortDir"),
+  homeCount: $("#homeCount"),
 
   seriesView: $("#seriesView"),
   seriesName: $("#seriesName"),
@@ -193,12 +194,7 @@ let state = {
   listHoverCardId: null,
   selectedCardId: null,
   imageViewer: null,
-  viewerCanvas: null,
-  viewerCtx: null,
-  viewerImageId: null,
-  viewerImage: null,
-  viewerZoom: 1,
-  viewerDrag: { active:false, startX:0, startY:0, curX:0, curY:0 },
+  viewerImageEl: null,
   focusCardId: null,
   focusUntil: 0,
   focusStart: 0,
@@ -242,6 +238,18 @@ function limitText(value, max){
 const CROP_ZOOM_MIN = 1;
 const CROP_ZOOM_MAX = 3;
 const CROP_ZOOM_STEP = 0.05;
+
+const COVER_PREVIEW_SIZES = {
+  small: { width: 120, height: 120, bg: "rgba(255,255,255,0.02)" },
+  large: { width: 640, height: 360, bg: "rgba(0,0,0,0.25)" },
+};
+
+const CARD_PREVIEW_PLACEHOLDER = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="100">
+    <rect width="140" height="100" rx="14" fill="rgba(255,255,255,0.06)"/>
+    <text x="70" y="58" text-anchor="middle" font-size="22" fill="rgba(255,255,255,0.8)">✦</text>
+  </svg>`
+);
 
 function clampZoom(value){
   return clamp(Number(value) || 1, CROP_ZOOM_MIN, CROP_ZOOM_MAX);
@@ -371,6 +379,88 @@ function applyCropPreview(imgEl, frameEl, pos, zoom){
   } else {
     imgEl.addEventListener("load", apply, { once: true });
   }
+}
+
+function getCanvasFillColor(el, fallback){
+  if (!el) return fallback;
+  const style = getComputedStyle(el);
+  const token = style.getPropertyValue("--canvas-bg").trim();
+  if (token) return token;
+  const bg = style.backgroundColor;
+  return bg && bg !== "rgba(0, 0, 0, 0)" ? bg : fallback;
+}
+
+function renderCoverPreviewFromImage(img, pos, zoom, size){
+  const canvas = document.createElement("canvas");
+  canvas.width = size.width;
+  canvas.height = size.height;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = size.bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const safeZoom = clampZoom(zoom || 1);
+  const { scaledW, scaledH, overflowX, overflowY } = getCropMetrics(
+    img.width || 1,
+    img.height || 1,
+    canvas.width,
+    canvas.height,
+    safeZoom
+  );
+  const nextPos = clampCropPosition(pos || { x: 50, y: 50 }, overflowX, overflowY);
+  const offsetX = overflowX ? (nextPos.x / 100) * overflowX : 0;
+  const offsetY = overflowY ? (nextPos.y / 100) * overflowY : 0;
+  ctx.drawImage(img, -offsetX, -offsetY, scaledW, scaledH);
+  return canvas.toDataURL("image/jpeg", 0.86);
+}
+
+function setCoverPreviewCache(seriesId, payload){
+  if (!payload) return;
+  state.coverCache.set(seriesId, {
+    smallUrl: payload.smallUrl,
+    largeUrl: payload.largeUrl,
+    imageId: payload.imageId,
+    pos: payload.pos,
+    zoom: payload.zoom,
+  });
+}
+
+function updateCoverCacheFromSeries(series){
+  if (!series) return;
+  if (!series.coverPreviewSmall && !series.coverPreviewLarge) return;
+  state.coverCache.set(series.id, {
+    smallUrl: series.coverPreviewSmall || null,
+    largeUrl: series.coverPreviewLarge || null,
+    imageId: series.coverImageId || null,
+    pos: series.coverPos || { x: 50, y: 50 },
+    zoom: series.coverZoom ?? 1,
+  });
+}
+
+async function ensureCoverPreviews(seriesId, coverOverride = null){
+  const series = state.series.find(s => s.id === seriesId);
+  if (!series) return;
+  const cover = coverOverride || await getSeriesCover(seriesId);
+  if (!cover?.blob) return;
+  const cached = state.coverCache.get(seriesId);
+  const pos = cover.pos || { x: 50, y: 50 };
+  const zoom = clampZoom(cover.zoom ?? 1);
+  const isCurrent = cached
+    && cached.imageId === cover.imageId
+    && cached.zoom === zoom
+    && cached.pos?.x === pos.x
+    && cached.pos?.y === pos.y
+    && cached.smallUrl
+    && cached.largeUrl;
+  if (isCurrent) return;
+
+  const { img, url } = await loadImageFromBlob(cover.blob);
+  const smallUrl = renderCoverPreviewFromImage(img, pos, zoom, COVER_PREVIEW_SIZES.small);
+  const largeUrl = renderCoverPreviewFromImage(img, pos, zoom, COVER_PREVIEW_SIZES.large);
+  URL.revokeObjectURL(url);
+
+  series.coverPreviewSmall = smallUrl;
+  series.coverPreviewLarge = largeUrl;
+  await db.put("series", series);
+  setCoverPreviewCache(seriesId, { smallUrl, largeUrl, imageId: cover.imageId, pos, zoom });
 }
 
 function updateZoomUI(editState, zoomInput, zoomValue){
@@ -536,14 +626,17 @@ function renderSeriesList(){
 
     const thumb = document.createElement("div");
     thumb.className = "thumb";
+    updateCoverCacheFromSeries(s);
     const cachedCover = state.coverCache.get(s.id);
-    if (cachedCover?.url){
+    if (cachedCover?.smallUrl){
       const img = new Image();
-      img.src = cachedCover.url;
+      img.src = cachedCover.smallUrl;
       thumb.appendChild(img);
-      applyCropPreview(img, thumb, cachedCover.pos, cachedCover.zoom);
     } else {
       thumb.innerHTML = `<div style="font-weight:900;color:rgba(255,255,255,0.65)">✦</div>`;
+      if (s.coverImageId){
+        ensureCoverPreviews(s.id);
+      }
     }
 
     const info = document.createElement("div");
@@ -579,28 +672,6 @@ function renderSeriesList(){
     item.addEventListener("click", () => openSeries(s.id));
     els.seriesList.appendChild(item);
 
-    // Async: thumbnail
-    (async () => {
-      const cover = await getSeriesCover(s.id);
-      if (!cover.blob) return;
-      const cached = state.coverCache.get(s.id);
-      const needsUrl = !cached || cached.imageId !== cover.imageId;
-      if (needsUrl){
-        setCoverCache(s.id, cover);
-      } else if (!cached){
-        setCoverCache(s.id, cover);
-      } else if (cached.pos.x !== cover.pos.x || cached.pos.y !== cover.pos.y || cached.zoom !== cover.zoom){
-        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, imageId: cover.imageId });
-      }
-      const url = state.coverCache.get(s.id)?.url;
-      if (!url) return;
-      const img = new Image();
-      img.src = url;
-      thumb.innerHTML = "";
-      thumb.appendChild(img);
-      applyCropPreview(img, thumb, cover.pos, cover.zoom);
-    })();
-
     // Async: progress text (received/total)
     (async () => {
       const cards = await db.getAllByIndex("cards","seriesId", s.id);
@@ -635,23 +706,15 @@ async function getSeriesCover(seriesId){
 }
 
 function clearCoverCache(seriesId){
-  const cached = state.coverCache.get(seriesId);
-  if (cached?.url) URL.revokeObjectURL(cached.url);
   state.coverCache.delete(seriesId);
-}
-
-function setCoverCache(seriesId, cover){
-  const cached = state.coverCache.get(seriesId);
-  if (cached?.url) URL.revokeObjectURL(cached.url);
-  if (!cover?.blob) return null;
-  const url = URL.createObjectURL(cover.blob);
-  state.coverCache.set(seriesId, { url, pos: cover.pos, zoom: cover.zoom, imageId: cover.imageId });
-  return url;
 }
 
 /* ---------- Home ---------- */
 async function renderHome(){
   els.homeGrid.innerHTML = "";
+  if (els.homeCount){
+    els.homeCount.textContent = `Серий: ${state.series.length}`;
+  }
   if (!state.series.length){
     els.homeEmpty.classList.remove("hidden");
     return;
@@ -742,39 +805,18 @@ async function renderHome(){
     actions.append(btnEdit, btnRefresh);
     thumb.appendChild(actions);
 
+    updateCoverCacheFromSeries(s);
     const cachedCover = state.coverCache.get(s.id);
-    if (cachedCover?.url){
+    if (cachedCover?.largeUrl){
       const img = new Image();
-      img.src = cachedCover.url;
+      img.src = cachedCover.largeUrl;
       thumb.classList.add("has-cover");
       thumb.innerHTML = "";
       thumb.appendChild(img);
       thumb.appendChild(actions);
-      applyCropPreview(img, thumb, cachedCover.pos, cachedCover.zoom);
+    } else if (s.coverImageId){
+      ensureCoverPreviews(s.id);
     }
-
-    (async () => {
-      const cover = await getSeriesCover(s.id);
-      if (!cover.blob) return;
-      const cached = state.coverCache.get(s.id);
-      const needsUrl = !cached || cached.imageId !== cover.imageId;
-      if (needsUrl){
-        setCoverCache(s.id, cover);
-      } else if (!cached){
-        setCoverCache(s.id, cover);
-      } else if (cached.pos.x !== cover.pos.x || cached.pos.y !== cover.pos.y || cached.zoom !== cover.zoom){
-        state.coverCache.set(s.id, { ...cached, pos: cover.pos, zoom: cover.zoom, imageId: cover.imageId });
-      }
-      const url = state.coverCache.get(s.id)?.url;
-      if (!url) return;
-      const img = new Image();
-      img.src = url;
-      thumb.classList.add("has-cover");
-      thumb.innerHTML = "";
-      thumb.appendChild(img);
-      thumb.appendChild(actions);
-      applyCropPreview(img, thumb, cover.pos, cover.zoom);
-    })();
 
     const body = document.createElement("div");
     body.className = "home-body";
@@ -835,6 +877,7 @@ async function openSeries(seriesId){
   els.seriesName.value = s.name || "";
 
   updateDropzoneVisibility();
+  await ensureCardPreviews();
   await renderImageBlocks();
   refreshStatsAndRender();
   window.scrollTo({top:0, behavior:"smooth"});
@@ -1062,12 +1105,14 @@ function findCardAtPoint(block, ix, iy){
 function drawImageBlock(block){
   const ctx = block.ctx;
   if (!ctx) return;
-  ctx.clearRect(0,0,block.canvas.width, block.canvas.height);
+  const bg = getCanvasFillColor(block.canvas.parentElement, "rgba(255,255,255,0.04)");
+  ctx.save();
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, block.canvas.width, block.canvas.height);
+  ctx.restore();
 
   if (!block.imageEl){
     ctx.save();
-    ctx.fillStyle = "rgba(255,255,255,0.05)";
-    ctx.fillRect(0,0,block.canvas.width, block.canvas.height);
     ctx.fillStyle = "rgba(255,255,255,0.75)";
     ctx.font = `${Math.floor(16*devicePixelRatio)}px system-ui`;
     const msg = "Добавь изображение, чтобы выделять открытки.";
@@ -1080,14 +1125,6 @@ function drawImageBlock(block){
   ctx.save();
   ctx.globalAlpha = 0.96;
   ctx.drawImage(block.imageEl, r.dx, r.dy, r.dw, r.dh);
-  ctx.restore();
-
-  ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.20)";
-  ctx.fillRect(0,0,block.canvas.width, r.dy);
-  ctx.fillRect(0, r.dy+r.dh, block.canvas.width, block.canvas.height-(r.dy+r.dh));
-  ctx.fillRect(0, r.dy, r.dx, r.dh);
-  ctx.fillRect(r.dx+r.dw, r.dy, block.canvas.width-(r.dx+r.dw), r.dh);
   ctx.restore();
 
   const imageCards = state.cards.filter(c=>c.imageId===block.imageId);
@@ -1233,6 +1270,9 @@ async function onImagePointerUp(evt, block){
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+  if (block.imageEl){
+    card.thumbPreview = renderCardPreviewDataURL(card, block.imageEl);
+  }
 
   await db.put("cards", card);
   state.cards.push(card);
@@ -1271,6 +1311,12 @@ async function addImageFromFile(file){
     series.coverZoom = 1;
     series.updatedAt = Date.now();
     await db.put("series", series);
+    await ensureCoverPreviews(series.id, {
+      blob: file,
+      pos: series.coverPos,
+      zoom: series.coverZoom,
+      imageId: image.id,
+    });
   }
 
   await touchSeriesUpdated();
@@ -1298,11 +1344,8 @@ function setupImageViewer(){
         <div class="viewer-title">Просмотр изображения</div>
         <button type="button" class="image-close" aria-label="Закрыть">×</button>
       </div>
-      <div class="viewer-canvas-wrap">
-        <canvas class="viewer-canvas" width="1200" height="800"></canvas>
-      </div>
-      <div class="viewer-controls">
-        <div class="viewer-hint">Можно выделять новые открытки прямо здесь.</div>
+      <div class="viewer-media">
+        <img class="viewer-image" alt="Просмотр изображения" />
       </div>
     </div>
   `;
@@ -1312,204 +1355,26 @@ function setupImageViewer(){
   document.body.appendChild(dialog);
   const closeBtn = dialog.querySelector(".image-close");
   closeBtn.addEventListener("click", () => dialog.close());
-  const canvas = dialog.querySelector(".viewer-canvas");
-  const ctx = canvas.getContext("2d");
-
-  canvas.addEventListener("pointerdown", onViewerPointerDown);
-  canvas.addEventListener("pointermove", onViewerPointerMove);
-  canvas.addEventListener("pointerup", onViewerPointerUp);
-  canvas.addEventListener("pointercancel", onViewerPointerUp);
+  const img = dialog.querySelector(".viewer-image");
 
   dialog.addEventListener("close", () => {
-    state.viewerImageId = null;
-    state.viewerImage = null;
-    state.viewerZoom = 1;
-    state.viewerDrag = { active:false, startX:0, startY:0, curX:0, curY:0 };
+    if (state.viewerImageEl){
+      state.viewerImageEl.src = "";
+    }
   });
 
   state.imageViewer = dialog;
-  state.viewerCanvas = canvas;
-  state.viewerCtx = ctx;
+  state.viewerImageEl = img;
 }
 
 function openImageViewer(imageId){
   if (!state.imageViewer) return;
   const block = state.imageBlocks.get(imageId);
   if (!block?.imageEl) return;
-  state.viewerImageId = imageId;
-  state.viewerImage = block.imageEl;
-  state.viewerZoom = 1;
+  if (state.viewerImageEl){
+    state.viewerImageEl.src = block.imageEl.src;
+  }
   state.imageViewer.showModal();
-  requestAnimationFrame(() => {
-    resizeViewerCanvas();
-    drawViewer();
-  });
-}
-
-function resizeViewerCanvas(){
-  if (!state.viewerCanvas) return;
-  const wrap = state.viewerCanvas.parentElement;
-  if (!wrap) return;
-  const cssW = wrap.clientWidth;
-  const cssH = wrap.clientHeight;
-  state.viewerCanvas.style.width = cssW + "px";
-  state.viewerCanvas.style.height = cssH + "px";
-  state.viewerCanvas.width = devicePx(cssW);
-  state.viewerCanvas.height = devicePx(cssH);
-}
-
-function viewerImageDrawRect(){
-  if (!state.viewerImage || !state.viewerCanvas) return {dx:0, dy:0, dw: state.viewerCanvas?.width || 1, dh: state.viewerCanvas?.height || 1};
-  const baseScale = Math.min(state.viewerCanvas.width / state.viewerImage.width, state.viewerCanvas.height / state.viewerImage.height);
-  const scale = baseScale * (state.viewerZoom || 1);
-  const dw = Math.floor(state.viewerImage.width * scale);
-  const dh = Math.floor(state.viewerImage.height * scale);
-  const dx = Math.floor((state.viewerCanvas.width - dw) / 2);
-  const dy = Math.floor((state.viewerCanvas.height - dh) / 2);
-  return {dx, dy, dw, dh, scale};
-}
-
-function isViewerPointInsideImage(x, y){
-  if (!state.viewerImage || !state.viewerCanvas) return false;
-  const r = viewerImageDrawRect();
-  return x >= r.dx && x <= r.dx + r.dw && y >= r.dy && y <= r.dy + r.dh;
-}
-
-function drawViewer(){
-  if (!state.viewerCtx || !state.viewerCanvas){
-    return;
-  }
-  const ctx = state.viewerCtx;
-  ctx.clearRect(0,0,state.viewerCanvas.width, state.viewerCanvas.height);
-  if (!state.viewerImage) return;
-
-  const r = viewerImageDrawRect();
-  ctx.save();
-  ctx.globalAlpha = 1;
-  ctx.drawImage(state.viewerImage, r.dx, r.dy, r.dw, r.dh);
-  ctx.restore();
-
-  const imageCards = state.cards.filter(c=>c.imageId===state.viewerImageId);
-  const focusActive = state.focusCardId && state.focusUntil && (Date.now() < state.focusUntil);
-  const showAll = state.viewerDrag.active;
-  const visibleIds = new Set();
-  if (state.listHoverCardId) visibleIds.add(state.listHoverCardId);
-  if (state.selectedCardId) visibleIds.add(state.selectedCardId);
-  if (focusActive && state.focusCardId) visibleIds.add(state.focusCardId);
-
-  for (const c of imageCards){
-    if (!showAll && !visibleIds.has(c.id)) continue;
-    const x1 = r.dx + c.x * r.scale;
-    const y1 = r.dy + c.y * r.scale;
-    const x2 = r.dx + (c.x + c.w) * r.scale;
-    const y2 = r.dy + (c.y + c.h) * r.scale;
-    const rr = rectNormalize(x1,y1,x2,y2);
-    const isFocus = focusActive && c.id === state.focusCardId;
-    const isReceived = !!c.received;
-    const isTrade = !!c.foundTrade;
-    ctx.save();
-    ctx.lineWidth = devicePx(isFocus ? 2.2 : 1.6);
-    ctx.strokeStyle = isReceived ? "rgba(34,197,94,0.95)"
-                  : isTrade ? "rgba(245,158,11,0.95)"
-                  : "rgba(167,139,250,0.95)";
-    ctx.fillStyle = isReceived ? "rgba(34,197,94,0.12)"
-                 : isTrade ? "rgba(245,158,11,0.10)"
-                 : "rgba(167,139,250,0.10)";
-    ctx.beginPath();
-    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  if (state.viewerDrag.active){
-    const rr = rectNormalize(state.viewerDrag.startX, state.viewerDrag.startY, state.viewerDrag.curX, state.viewerDrag.curY);
-    ctx.save();
-    ctx.lineWidth = devicePx(2);
-    ctx.strokeStyle = "rgba(255,255,255,0.95)";
-    ctx.setLineDash([devicePx(8), devicePx(6)]);
-    ctx.fillStyle = "rgba(255,255,255,0.10)";
-    ctx.beginPath();
-    ctx.roundRect(rr.x, rr.y, rr.w, rr.h, devicePx(10));
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-}
-
-function onViewerPointerDown(evt){
-  if (!state.viewerCanvas || !state.viewerImage) return;
-  const {x,y} = pointerPos(evt, state.viewerCanvas);
-  if (!isViewerPointInsideImage(x, y)) return;
-  state.viewerCanvas.setPointerCapture(evt.pointerId);
-  state.viewerDrag.active = true;
-  state.viewerDrag.startX = x;
-  state.viewerDrag.startY = y;
-  state.viewerDrag.curX = x;
-  state.viewerDrag.curY = y;
-  drawViewer();
-}
-
-function onViewerPointerMove(evt){
-  if (!state.viewerCanvas) return;
-  if (!state.viewerDrag.active) return;
-  const {x,y} = pointerPos(evt, state.viewerCanvas);
-  state.viewerDrag.curX = x;
-  state.viewerDrag.curY = y;
-  drawViewer();
-}
-
-async function onViewerPointerUp(evt){
-  if (!state.viewerDrag.active) return;
-  state.viewerDrag.active = false;
-  if (!state.viewerImage || !state.viewerImageId || !state.viewerCanvas) return;
-
-  const rr = rectNormalize(state.viewerDrag.startX, state.viewerDrag.startY, state.viewerDrag.curX, state.viewerDrag.curY);
-  if (!rectValid(rr)){
-    drawViewer();
-    return;
-  }
-
-  const r = viewerImageDrawRect();
-  const ix1 = (rr.x - r.dx) / r.scale;
-  const iy1 = (rr.y - r.dy) / r.scale;
-  const ix2 = (rr.x + rr.w - r.dx) / r.scale;
-  const iy2 = (rr.y + rr.h - r.dy) / r.scale;
-  const ir = rectNormalize(
-    clamp(ix1, 0, state.viewerImage.width),
-    clamp(iy1, 0, state.viewerImage.height),
-    clamp(ix2, 0, state.viewerImage.width),
-    clamp(iy2, 0, state.viewerImage.height)
-  );
-  const existing = state.cards.filter(c=>c.imageId===state.viewerImageId);
-  if (bestOverlap(ir, existing) > 0.82){
-    drawViewer();
-    return;
-  }
-
-  const card = {
-    id: uid("card"),
-    seriesId: state.activeSeriesId,
-    imageId: state.viewerImageId,
-    x: Math.round(ir.x),
-    y: Math.round(ir.y),
-    w: Math.round(ir.w),
-    h: Math.round(ir.h),
-    foundTrade: false,
-    received: false,
-    title: "",
-    note: "",
-    thumbPos: {x:50, y:50},
-    thumbZoom: 1,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-
-  await db.put("cards", card);
-  state.cards.push(card);
-  await touchSeriesUpdated();
-  refreshStatsAndRender();
-  drawViewer();
 }
 
 /* ---------- Stats + list ---------- */
@@ -1542,14 +1407,8 @@ async function ensureImageCache(){
   }
 }
 
-function miniPreviewDataURL(card){
-  const img = state.imageById.get(card.imageId);
-  if (!img) {
-    return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="140" height="100">
-      <rect width="140" height="100" rx="14" fill="rgba(255,255,255,0.06)"/>
-      <text x="70" y="58" text-anchor="middle" font-size="22" fill="rgba(255,255,255,0.8)">✦</text>
-    </svg>`);
-  }
+function renderCardPreviewDataURL(card, img){
+  if (!img) return CARD_PREVIEW_PLACEHOLDER;
   const oc = document.createElement("canvas");
   // Keep aspect ratio to avoid squished previews
   const maxW = 320, maxH = 240;
@@ -1569,8 +1428,22 @@ function miniPreviewDataURL(card){
   return oc.toDataURL("image/jpeg", 0.78);
 }
 
-async function renderCardsList(){
+function cardPreviewSrc(card){
+  return card.thumbPreview || CARD_PREVIEW_PLACEHOLDER;
+}
+
+async function ensureCardPreviews(){
   await ensureImageCache();
+  for (const c of state.cards){
+    if (c.thumbPreview) continue;
+    const img = state.imageById.get(c.imageId);
+    if (!img) continue;
+    c.thumbPreview = renderCardPreviewDataURL(c, img);
+    await db.put("cards", c);
+  }
+}
+
+async function renderCardsList(){
   const visible = filterCards(state.cards);
   els.cardsList.innerHTML = "";
 
@@ -1596,7 +1469,7 @@ async function renderCardsList(){
     mini.className = "mini";
     const img = document.createElement("img");
     img.alt = "";
-    img.src = miniPreviewDataURL(c);
+    img.src = cardPreviewSrc(c);
     const pos = c.thumbPos || {x:50, y:50};
     const zoom = clampZoom(c.thumbZoom ?? 1);
     applyCropPreview(img, mini, pos, zoom);
@@ -1725,12 +1598,10 @@ async function renderCardsList(){
     wrap.addEventListener("mouseenter", () => {
       state.listHoverCardId = c.id;
       drawAllImageBlocks();
-      if (state.imageViewer?.open) drawViewer();
     });
     wrap.addEventListener("mouseleave", () => {
       state.listHoverCardId = null;
       drawAllImageBlocks();
-      if (state.imageViewer?.open) drawViewer();
     });
 
     els.cardsList.appendChild(wrap);
@@ -1760,11 +1631,9 @@ function startFocusPulse(cardId){
       state.focusUntil = 0;
       state.focusAnimationId = null;
       drawAllImageBlocks();
-      if (state.imageViewer?.open) drawViewer();
       return;
     }
     drawAllImageBlocks();
-    if (state.imageViewer?.open) drawViewer();
     state.focusAnimationId = requestAnimationFrame(tick);
   };
   state.focusAnimationId = requestAnimationFrame(tick);
@@ -1784,7 +1653,6 @@ function refreshStatsAndRender(){
   renderStats();
   renderCardsList();
   drawAllImageBlocks();
-  if (state.imageViewer?.open) drawViewer();
   updateMasterCheckboxes();
 }
 
@@ -2064,11 +1932,30 @@ function applyHomeSortSetting(key, dir){
   renderHome();
 }
 
+async function primeCoverPreviews(){
+  for (const s of state.series){
+    updateCoverCacheFromSeries(s);
+  }
+  for (const s of state.series){
+    if (!s.coverImageId) continue;
+    if (s.coverPreviewSmall && s.coverPreviewLarge) continue;
+    await ensureCoverPreviews(s.id);
+  }
+}
+
 async function openThumbEditor(card){
   const pos = card.thumbPos ? {...card.thumbPos} : {x:50, y:50};
   const zoom = clampZoom(card.thumbZoom ?? 1);
   const img = new Image();
-  img.src = miniPreviewDataURL(card);
+  if (!card.thumbPreview){
+    await ensureImageCache();
+    const sourceImg = state.imageById.get(card.imageId);
+    if (sourceImg){
+      card.thumbPreview = renderCardPreviewDataURL(card, sourceImg);
+      await db.put("cards", card);
+    }
+  }
+  img.src = cardPreviewSrc(card);
   await img.decode().catch(()=>{});
   state.thumbEdit = {
     card,
@@ -2113,6 +2000,7 @@ async function openCoverEditor(seriesId){
   state.coverEdit = {
     series,
     imageId,
+    blob,
     pos: {...pos},
     zoom: clampZoom(zoom ?? 1),
     imgW: img.width || 1,
@@ -2177,6 +2065,12 @@ async function refreshSeriesCover(seriesId){
   series.updatedAt = Date.now();
   await db.put("series", series);
   clearCoverCache(seriesId);
+  await ensureCoverPreviews(seriesId, {
+    blob: images[0].imageBlob,
+    pos: series.coverPos,
+    zoom: series.coverZoom,
+    imageId: images[0].id,
+  });
   state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
   renderSeriesList();
   await renderHome();
@@ -2373,15 +2267,12 @@ function initEvents(){
       state.coverEdit.series.coverImageId = state.coverEdit.imageId;
       state.coverEdit.series.updatedAt = Date.now();
       await db.put("series", state.coverEdit.series);
-      const cached = state.coverCache.get(state.coverEdit.series.id);
-      if (cached){
-        state.coverCache.set(state.coverEdit.series.id, {
-          ...cached,
-          pos: {...state.coverEdit.pos},
-          zoom: clampZoom(state.coverEdit.zoom || 1),
-          imageId: state.coverEdit.imageId,
-        });
-      }
+      await ensureCoverPreviews(state.coverEdit.series.id, {
+        blob: state.coverEdit.blob,
+        pos: {...state.coverEdit.pos},
+        zoom: clampZoom(state.coverEdit.zoom || 1),
+        imageId: state.coverEdit.imageId,
+      });
       state.series.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
       renderSeriesList();
       await renderHome();
@@ -2394,10 +2285,6 @@ function initEvents(){
 
   window.addEventListener("resize", () => {
     resizeAllImageBlocks();
-    if (state.imageViewer?.open){
-      resizeViewerCanvas();
-      drawViewer();
-    }
   });
 
   let dragDepth = 0;
@@ -2444,6 +2331,7 @@ async function loadAll(){
   updateHomeSortControls();
 
   state.series = (await db.getAll("series")).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  await primeCoverPreviews();
   renderSeriesList();
   await renderHome();
 
