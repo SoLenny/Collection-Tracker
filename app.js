@@ -195,6 +195,10 @@ let state = {
   selectedCardId: null,
   imageViewer: null,
   viewerImageEl: null,
+  viewerZoom: 1,
+  viewerTx: 0,
+  viewerTy: 0,
+  viewerUpdateTransform: null,
   focusCardId: null,
   focusUntil: 0,
   focusStart: 0,
@@ -1366,6 +1370,12 @@ function setupImageViewer(){
     <div class="dialog-card dialog-image">
       <div class="viewer-head">
         <div class="viewer-title">Просмотр изображения</div>
+        <div class="viewer-controls">
+          <button type="button" class="viewer-zoom-btn viewer-zoom-out" aria-label="Уменьшить">−</button>
+          <input type="range" class="viewer-zoom-range" min="1" max="3" step="0.05" value="1" aria-label="Зум" />
+          <button type="button" class="viewer-zoom-btn viewer-zoom-in" aria-label="Увеличить">+</button>
+          <div class="viewer-zoom-value" aria-live="polite">100%</div>
+        </div>
         <button type="button" class="image-close" aria-label="Закрыть">×</button>
       </div>
       <div class="viewer-media">
@@ -1379,25 +1389,136 @@ function setupImageViewer(){
   document.body.appendChild(dialog);
   const closeBtn = dialog.querySelector(".image-close");
   closeBtn.addEventListener("click", () => dialog.close());
+  const viewerMedia = dialog.querySelector(".viewer-media");
   const img = dialog.querySelector(".viewer-image");
+  const zoomRange = dialog.querySelector(".viewer-zoom-range");
+  const zoomValue = dialog.querySelector(".viewer-zoom-value");
+  const zoomInBtn = dialog.querySelector(".viewer-zoom-in");
+  const zoomOutBtn = dialog.querySelector(".viewer-zoom-out");
+  const zoomMin = Number(zoomRange.min);
+  const zoomMax = Number(zoomRange.max);
+  let dragPointerId = null;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let dragStartTx = 0;
+  let dragStartTy = 0;
+
+  const clampViewerTranslation = () => {
+    if (!state.viewerImageEl?.naturalWidth) return { tx: 0, ty: 0 };
+    const bounds = viewerMedia.getBoundingClientRect();
+    const baseScale = Math.min(
+      bounds.width / state.viewerImageEl.naturalWidth,
+      bounds.height / state.viewerImageEl.naturalHeight
+    );
+    const scaledW = state.viewerImageEl.naturalWidth * baseScale * state.viewerZoom;
+    const scaledH = state.viewerImageEl.naturalHeight * baseScale * state.viewerZoom;
+    const maxOffsetX = Math.max(0, (scaledW - bounds.width) / 2);
+    const maxOffsetY = Math.max(0, (scaledH - bounds.height) / 2);
+    return {
+      tx: clamp(state.viewerTx, -maxOffsetX, maxOffsetX),
+      ty: clamp(state.viewerTy, -maxOffsetY, maxOffsetY),
+    };
+  };
+
+  const updateViewerTransform = () => {
+    if (!state.viewerImageEl) return;
+    const { tx, ty } = clampViewerTranslation();
+    state.viewerTx = tx;
+    state.viewerTy = ty;
+    state.viewerImageEl.style.transform = `translate(${state.viewerTx}px, ${state.viewerTy}px) scale(${state.viewerZoom})`;
+    zoomRange.value = String(state.viewerZoom);
+    zoomValue.textContent = `${Math.round(state.viewerZoom * 100)}%`;
+  };
+
+  const resetViewerState = () => {
+    state.viewerZoom = 1;
+    state.viewerTx = 0;
+    state.viewerTy = 0;
+    updateViewerTransform();
+  };
+
+  zoomRange.addEventListener("input", () => {
+    state.viewerZoom = clamp(Number(zoomRange.value), zoomMin, zoomMax);
+    updateViewerTransform();
+  });
+
+  zoomInBtn.addEventListener("click", () => {
+    state.viewerZoom = clamp(state.viewerZoom + 0.1, zoomMin, zoomMax);
+    updateViewerTransform();
+  });
+
+  zoomOutBtn.addEventListener("click", () => {
+    state.viewerZoom = clamp(state.viewerZoom - 0.1, zoomMin, zoomMax);
+    updateViewerTransform();
+  });
+
+  viewerMedia.addEventListener("wheel", (evt) => {
+    if (!state.viewerImageEl?.naturalWidth) return;
+    evt.preventDefault();
+    const direction = evt.deltaY > 0 ? -1 : 1;
+    const nextZoom = state.viewerZoom + direction * 0.1;
+    state.viewerZoom = clamp(nextZoom, zoomMin, zoomMax);
+    updateViewerTransform();
+  }, { passive: false });
+
+  viewerMedia.addEventListener("pointerdown", (evt) => {
+    if (evt.button !== 0) return;
+    dragPointerId = evt.pointerId;
+    viewerMedia.setPointerCapture(dragPointerId);
+    dragStartX = evt.clientX;
+    dragStartY = evt.clientY;
+    dragStartTx = state.viewerTx;
+    dragStartTy = state.viewerTy;
+    viewerMedia.classList.add("is-dragging");
+  });
+
+  viewerMedia.addEventListener("pointermove", (evt) => {
+    if (dragPointerId !== evt.pointerId) return;
+    const dx = evt.clientX - dragStartX;
+    const dy = evt.clientY - dragStartY;
+    state.viewerTx = dragStartTx + dx;
+    state.viewerTy = dragStartTy + dy;
+    updateViewerTransform();
+  });
+
+  const endDrag = (evt) => {
+    if (dragPointerId !== evt.pointerId) return;
+    viewerMedia.releasePointerCapture(dragPointerId);
+    dragPointerId = null;
+    viewerMedia.classList.remove("is-dragging");
+  };
+
+  viewerMedia.addEventListener("pointerup", endDrag);
+  viewerMedia.addEventListener("pointercancel", endDrag);
+
+  img.addEventListener("load", () => {
+    updateViewerTransform();
+  });
 
   dialog.addEventListener("close", () => {
     if (state.viewerImageEl){
       state.viewerImageEl.src = "";
     }
+    resetViewerState();
   });
 
   state.imageViewer = dialog;
   state.viewerImageEl = img;
+  state.viewerUpdateTransform = updateViewerTransform;
+  resetViewerState();
 }
 
 function openImageViewer(imageId){
   if (!state.imageViewer) return;
   const block = state.imageBlocks.get(imageId);
   if (!block?.imageEl) return;
+  state.viewerZoom = 1;
+  state.viewerTx = 0;
+  state.viewerTy = 0;
   if (state.viewerImageEl){
     state.viewerImageEl.src = block.imageEl.src;
   }
+  state.viewerUpdateTransform?.();
   state.imageViewer.showModal();
 }
 
