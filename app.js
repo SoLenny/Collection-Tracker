@@ -183,6 +183,8 @@ let state = {
   activeSeriesId: null,
   images: [],
   cards: [],
+  allCards: [],
+  cardsBySeriesId: new Map(),
 
   statusFilter: "all",
   seriesSearch: "",
@@ -209,6 +211,33 @@ let state = {
   thumbEdit: null,
   coverEdit: null,
 };
+
+function buildCardsCache(cards){
+  state.allCards = cards;
+  state.cardsBySeriesId = new Map();
+  for (const card of cards){
+    const bucket = state.cardsBySeriesId.get(card.seriesId);
+    if (bucket){
+      bucket.push(card);
+    } else {
+      state.cardsBySeriesId.set(card.seriesId, [card]);
+    }
+  }
+}
+
+function syncCardsCacheForSeries(seriesId, cards){
+  state.allCards = state.allCards.filter(card => card.seriesId !== seriesId).concat(cards);
+  state.cardsBySeriesId.set(seriesId, cards);
+}
+
+function removeSeriesCardsFromCache(seriesId){
+  state.allCards = state.allCards.filter(card => card.seriesId !== seriesId);
+  state.cardsBySeriesId.delete(seriesId);
+}
+
+function getCardsForSeries(seriesId){
+  return state.cardsBySeriesId.get(seriesId) || [];
+}
 
 function uid(prefix="id"){ return `${prefix}_${crypto.randomUUID()}`; }
 function clamp(n,a,b){ return Math.max(a, Math.min(b,n)); }
@@ -676,14 +705,11 @@ function renderSeriesList(){
     item.addEventListener("click", () => openSeries(s.id));
     els.seriesList.appendChild(item);
 
-    // Async: progress text (received/total)
-    (async () => {
-      const cards = await db.getAllByIndex("cards","seriesId", s.id);
-      const total = cards.length;
-      const received = cards.reduce((acc,c)=>acc + (c.received ? 1 : 0), 0);
-      badge.textContent = `${received}/${total}`;
-      badge.classList.toggle("dim", total === 0);
-    })();
+    const cards = getCardsForSeries(s.id);
+    const total = cards.length;
+    const received = cards.reduce((acc,c)=>acc + (c.received ? 1 : 0), 0);
+    badge.textContent = `${received}/${total}`;
+    badge.classList.toggle("dim", total === 0);
   }
 }
 
@@ -725,8 +751,8 @@ async function renderHome(){
   }
   els.homeEmpty.classList.add("hidden");
 
-  const seriesStats = await Promise.all(state.series.map(async (s) => {
-    const cards = await db.getAllByIndex("cards","seriesId", s.id);
+  const seriesStats = state.series.map((s) => {
+    const cards = getCardsForSeries(s.id);
     const progress = computeProgress(cards);
     return {
       series: s,
@@ -736,7 +762,7 @@ async function renderHome(){
       completion: progress.pct,
       title: seriesDisplayName(s.name).toLowerCase(),
     };
-  }));
+  });
 
   let ordered = seriesStats.slice();
   const dir = state.homeSortDir === "desc" ? -1 : 1;
@@ -872,6 +898,7 @@ async function openSeries(seriesId){
     state.images.sort((a,b)=>(a.index||0)-(b.index||0));
   }
   state.cards = (await db.getAllByIndex("cards","seriesId", seriesId)).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+  syncCardsCacheForSeries(seriesId, state.cards);
 
   setStatusFilter("all");
   state.selectedCardId = null;
@@ -1304,6 +1331,7 @@ async function onImagePointerUp(evt, block){
 
   await db.put("cards", card);
   state.cards.push(card);
+  syncCardsCacheForSeries(state.activeSeriesId, state.cards);
   await touchSeriesUpdated();
   refreshStatsAndRender();
 }
@@ -1540,16 +1568,38 @@ function filterCards(cards){
 function cardLabel(idx){ return `Открытка ${String(idx+1).padStart(2,"0")}`; }
 
 async function ensureImageCache(){
-  state.imageById = new Map();
+  const nextCache = new Map(state.imageById);
+  const seenIds = new Set();
+  const pending = [];
   for (const image of state.images){
-    if (!image.imageBlob) continue;
+    seenIds.add(image.id);
+    if (!image.imageBlob){
+      nextCache.delete(image.id);
+      continue;
+    }
+    const cached = state.imageById.get(image.id);
+    if (cached?.__blob === image.imageBlob){
+      nextCache.set(image.id, cached);
+      continue;
+    }
     const url = URL.createObjectURL(image.imageBlob);
     const img = new Image();
     img.src = url;
-    await img.decode().catch(()=>{});
-    URL.revokeObjectURL(url);
-    state.imageById.set(image.id, img);
+    pending.push(
+      img.decode()
+        .catch(()=>{})
+        .then(() => {
+          URL.revokeObjectURL(url);
+          img.__blob = image.imageBlob;
+          nextCache.set(image.id, img);
+        })
+    );
   }
+  await Promise.all(pending);
+  for (const id of Array.from(nextCache.keys())){
+    if (!seenIds.has(id)) nextCache.delete(id);
+  }
+  state.imageById = nextCache;
 }
 
 function getCardPreviewSize(card){
@@ -1631,6 +1681,7 @@ function cardPreviewSrc(card){
 
 async function ensureCardPreviews(){
   await ensureImageCache();
+  const updates = [];
   for (const c of state.cards){
     const needsRefresh = !c.thumbPreview
       || (c.thumbZoom ?? 1) !== 1
@@ -1640,8 +1691,9 @@ async function ensureCardPreviews(){
     const img = state.imageById.get(c.imageId);
     if (!img) continue;
     c.thumbPreview = renderCardPreviewDataURL(c, img);
-    await db.put("cards", c);
+    updates.push(db.put("cards", c));
   }
+  await Promise.all(updates);
 }
 
 async function renderCardsList(){
@@ -1781,6 +1833,7 @@ async function renderCardsList(){
       if (!ok) return;
       await db.delete("cards", c.id);
       state.cards = state.cards.filter(x=>x.id!==c.id);
+      syncCardsCacheForSeries(state.activeSeriesId, state.cards);
       if (state.selectedCardId === c.id) state.selectedCardId = null;
       if (state.listHoverCardId === c.id) state.listHoverCardId = null;
       if (state.hoverCardId === c.id) state.hoverCardId = null;
@@ -1967,6 +2020,7 @@ async function deleteSeriesById(id){
   for (const img of images) await db.delete("images", img.id);
   await db.delete("series", id);
   clearCoverCache(id);
+  removeSeriesCardsFromCache(id);
 
   state.series = state.series.filter(x=>x.id!==id);
   if (state.activeSeriesId === id){
@@ -2106,6 +2160,7 @@ async function undoLastSelection(){
   if (!ok) return;
   await db.delete("cards", last.id);
   state.cards = state.cards.filter(x=>x.id!==last.id);
+  syncCardsCacheForSeries(state.activeSeriesId, state.cards);
   await touchSeriesUpdated();
   refreshStatsAndRender();
 }
@@ -2527,6 +2582,7 @@ async function loadAll(){
   updateHomeSortControls();
 
   state.series = (await db.getAll("series")).sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+  buildCardsCache(await db.getAll("cards"));
   await primeCoverPreviews();
   renderSeriesList();
   await renderHome();
