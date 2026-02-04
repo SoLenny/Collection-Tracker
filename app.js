@@ -1016,6 +1016,12 @@ async function createImageBlock(image, idx){
     drag: { active:false, startX:0, startY:0, curX:0, curY:0 },
   };
   state.imageBlocks.set(image.id, block);
+  if (img){
+    img.addEventListener("load", () => resizeImageBlock(block), { once: true });
+    if (img.complete && img.naturalWidth){
+      requestAnimationFrame(() => resizeImageBlock(block));
+    }
+  }
 
   canvas.addEventListener("pointerdown", (evt) => onImagePointerDown(evt, block));
   canvas.addEventListener("pointermove", (evt) => onImagePointerMove(evt, block));
@@ -1041,7 +1047,12 @@ function resizeImageBlock(block){
   const parent = block.canvas.parentElement;
   if (!parent) return;
   const cssW = parent.clientWidth;
-  const cssH = Math.min(Math.max(420, window.innerHeight - 320), 720);
+  const imgW = block.imageEl?.naturalWidth || block.imageEl?.width || 0;
+  const imgH = block.imageEl?.naturalHeight || block.imageEl?.height || 0;
+  const ratio = imgW > 0 && imgH > 0 ? imgH / imgW : 0.75;
+  const minH = 320;
+  const maxH = Math.min(720, Math.max(420, window.innerHeight - 240));
+  const cssH = clamp(cssW * ratio, minH, maxH);
   block.canvas.style.width = cssW + "px";
   block.canvas.style.height = cssH + "px";
   block.canvas.width = devicePx(cssW);
@@ -1052,14 +1063,18 @@ function resizeImageBlock(block){
 
 function computeImageScaleFor(block){
   if (!block.imageEl){ block.imageScale = 1; return; }
-  const sx = block.canvas.width / block.imageEl.width;
-  const sy = block.canvas.height / block.imageEl.height;
-  block.imageScale = Math.min(sx, sy);
+  const imgW = block.imageEl.naturalWidth || block.imageEl.width || 1;
+  const imgH = block.imageEl.naturalHeight || block.imageEl.height || 1;
+  const sx = block.canvas.width / imgW;
+  const sy = block.canvas.height / imgH;
+  block.imageScale = Math.max(sx, sy);
 }
 function imageDrawRectFor(block){
   if (!block.imageEl) return {dx:0, dy:0, dw: block.canvas.width, dh: block.canvas.height};
-  const dw = Math.floor(block.imageEl.width * block.imageScale);
-  const dh = Math.floor(block.imageEl.height * block.imageScale);
+  const imgW = block.imageEl.naturalWidth || block.imageEl.width || 1;
+  const imgH = block.imageEl.naturalHeight || block.imageEl.height || 1;
+  const dw = Math.ceil(imgW * block.imageScale);
+  const dh = Math.ceil(imgH * block.imageScale);
   const dx = Math.floor((block.canvas.width - dw) / 2);
   const dy = Math.floor((block.canvas.height - dh) / 2);
   return {dx, dy, dw, dh};
