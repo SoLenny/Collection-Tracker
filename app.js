@@ -1431,25 +1431,77 @@ async function ensureImageCache(){
   }
 }
 
+function getCardPreviewSize(card){
+  const maxW = 320;
+  const maxH = 240;
+  const ratio = Math.max(1, card.w) / Math.max(1, card.h);
+  let width = maxW;
+  let height = Math.round(width / ratio);
+  if (height > maxH){
+    height = maxH;
+    width = Math.round(height * ratio);
+  }
+  return { width, height };
+}
+
+function renderCardBasePreviewDataURL(card, img){
+  if (!img) return CARD_PREVIEW_PLACEHOLDER;
+  const { width, height } = getCardPreviewSize(card);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.clearRect(0, 0, width, height);
+  ctx.drawImage(
+    img,
+    Math.max(0, card.x),
+    Math.max(0, card.y),
+    Math.max(1, card.w),
+    Math.max(1, card.h),
+    0,
+    0,
+    width,
+    height
+  );
+  return canvas.toDataURL("image/jpeg", 0.78);
+}
+
 function renderCardPreviewDataURL(card, img){
   if (!img) return CARD_PREVIEW_PLACEHOLDER;
-  const oc = document.createElement("canvas");
-  // Keep aspect ratio to avoid squished previews
-  const maxW = 320, maxH = 240;
-  const ratio = Math.max(1, card.w) / Math.max(1, card.h);
-  let ow = maxW;
-  let oh = Math.round(ow / ratio);
-  if (oh > maxH){
-    oh = maxH;
-    ow = Math.round(oh * ratio);
-  }
-  oc.width = ow;
-  oc.height = oh;
-  const cctx = oc.getContext("2d");
-  cctx.imageSmoothingEnabled = true;
-  cctx.clearRect(0,0,ow,oh);
-  cctx.drawImage(img, Math.max(0,card.x), Math.max(0,card.y), Math.max(1,card.w), Math.max(1,card.h), 0,0,ow,oh);
-  return oc.toDataURL("image/jpeg", 0.78);
+  const { width, height } = getCardPreviewSize(card);
+  const baseCanvas = document.createElement("canvas");
+  baseCanvas.width = width;
+  baseCanvas.height = height;
+  const baseCtx = baseCanvas.getContext("2d");
+  baseCtx.imageSmoothingEnabled = true;
+  baseCtx.clearRect(0, 0, width, height);
+  baseCtx.drawImage(
+    img,
+    Math.max(0, card.x),
+    Math.max(0, card.y),
+    Math.max(1, card.w),
+    Math.max(1, card.h),
+    0,
+    0,
+    width,
+    height
+  );
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.clearRect(0, 0, width, height);
+
+  const safeZoom = clampZoom(card.thumbZoom ?? 1);
+  const { scaledW, scaledH, overflowX, overflowY } = getCropMetrics(width, height, width, height, safeZoom);
+  const nextPos = clampCropPosition(card.thumbPos || { x: 50, y: 50 }, overflowX, overflowY);
+  const offsetX = overflowX ? (nextPos.x / 100) * overflowX : 0;
+  const offsetY = overflowY ? (nextPos.y / 100) * overflowY : 0;
+  ctx.drawImage(baseCanvas, -offsetX, -offsetY, scaledW, scaledH);
+  return canvas.toDataURL("image/jpeg", 0.78);
 }
 
 function cardPreviewSrc(card){
@@ -1459,7 +1511,11 @@ function cardPreviewSrc(card){
 async function ensureCardPreviews(){
   await ensureImageCache();
   for (const c of state.cards){
-    if (c.thumbPreview) continue;
+    const needsRefresh = !c.thumbPreview
+      || (c.thumbZoom ?? 1) !== 1
+      || (Number(c.thumbPos?.x) || 50) !== 50
+      || (Number(c.thumbPos?.y) || 50) !== 50;
+    if (!needsRefresh) continue;
     const img = state.imageById.get(c.imageId);
     if (!img) continue;
     c.thumbPreview = renderCardPreviewDataURL(c, img);
@@ -1494,9 +1550,6 @@ async function renderCardsList(){
     const img = document.createElement("img");
     img.alt = "";
     img.src = cardPreviewSrc(c);
-    const pos = c.thumbPos || {x:50, y:50};
-    const zoom = clampZoom(c.thumbZoom ?? 1);
-    applyCropPreview(img, mini, pos, zoom);
     mini.appendChild(img);
 
     const editBtn = document.createElement("button");
@@ -1970,16 +2023,10 @@ async function primeCoverPreviews(){
 async function openThumbEditor(card){
   const pos = card.thumbPos ? {...card.thumbPos} : {x:50, y:50};
   const zoom = clampZoom(card.thumbZoom ?? 1);
+  await ensureImageCache();
+  const sourceImg = state.imageById.get(card.imageId);
   const img = new Image();
-  if (!card.thumbPreview){
-    await ensureImageCache();
-    const sourceImg = state.imageById.get(card.imageId);
-    if (sourceImg){
-      card.thumbPreview = renderCardPreviewDataURL(card, sourceImg);
-      await db.put("cards", card);
-    }
-  }
-  img.src = cardPreviewSrc(card);
+  img.src = sourceImg ? renderCardBasePreviewDataURL(card, sourceImg) : cardPreviewSrc(card);
   await img.decode().catch(()=>{});
   state.thumbEdit = {
     card,
@@ -1987,6 +2034,7 @@ async function openThumbEditor(card){
     zoom,
     imgW: img.width || 1,
     imgH: img.height || 1,
+    sourceImg,
     isDragging: false,
     startX: 0,
     startY: 0,
@@ -2231,6 +2279,9 @@ function initEvents(){
       state.thumbEdit.card.thumbPos = {...state.thumbEdit.pos};
       state.thumbEdit.card.thumbZoom = clampZoom(state.thumbEdit.zoom || 1);
       state.thumbEdit.card.updatedAt = Date.now();
+      if (state.thumbEdit.sourceImg){
+        state.thumbEdit.card.thumbPreview = renderCardPreviewDataURL(state.thumbEdit.card, state.thumbEdit.sourceImg);
+      }
       await db.put("cards", state.thumbEdit.card);
       await touchSeriesUpdated();
       refreshStatsAndRender();
