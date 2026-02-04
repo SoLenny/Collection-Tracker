@@ -20,6 +20,7 @@
     </div>
     <div class="topbar-actions">
       <button id="btnHome" class="btn ghost" title="Главная">Главная</button>
+      <button id="btnCollections" class="btn ghost" title="Коллекции">Коллекции</button>
       <button id="btnExport" class="btn ghost" title="Экспорт данных в JSON">Экспорт</button>
       <label class="btn ghost file">
         Импорт
@@ -161,6 +162,59 @@
           </div>
         </div>
       </div>
+
+      <div id="collectionsView" class="collections-view hidden">
+        <div id="collectionsListView" class="collections-list-view">
+          <div class="collections-head">
+            <div>
+              <div class="collections-title">Коллекции</div>
+              <div class="collections-sub">Создавай наборы, добавляй изображения и отмечай предметы чек-боксами.</div>
+              <div class="collections-count" id="collectionsCount"></div>
+            </div>
+            <button id="btnNewCollection" class="btn primary">＋ Добавить коллекцию</button>
+          </div>
+          <div id="collectionsGrid" class="collections-grid"></div>
+          <div id="collectionsEmpty" class="home-empty hidden">
+            <div class="empty-card">
+              <div class="empty-title">Добавь первую коллекцию</div>
+              <div class="empty-text">Храни изображения и отмечай элементы — всё сохранится в IndexedDB.</div>
+              <button id="btnNewCollection2" class="btn primary">＋ Добавить коллекцию</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="collectionDetailView" class="collection-detail hidden">
+          <div class="collection-toolbar">
+            <button id="btnBackToCollections" class="btn ghost">← К коллекциям</button>
+            <input id="collectionName" class="collection-name" type="text" placeholder="Название коллекции" maxlength="60" />
+            <button id="btnDeleteCollection" class="btn danger ghost">Удалить коллекцию</button>
+          </div>
+          <div class="collection-controls">
+            <label class="btn">
+              ＋ Добавить изображения
+              <input id="collectionImagesInput" type="file" accept="image/*" multiple />
+            </label>
+            <div class="collection-item-form">
+              <input id="collectionItemName" class="input" type="text" placeholder="Название предмета" maxlength="80" />
+              <select id="collectionItemStatus" class="select">
+                <option value="planned">Запланировано</option>
+                <option value="searching">Ищу</option>
+                <option value="owned">В коллекции</option>
+                <option value="duplicate">Дубликат</option>
+              </select>
+              <button id="btnAddCollectionItem" class="btn primary" type="button">＋ Добавить предмет</button>
+            </div>
+          </div>
+          <div class="collection-section">
+            <div class="collection-section-title">Галерея</div>
+            <div id="collectionGallery" class="collection-gallery"></div>
+          </div>
+          <div class="collection-section">
+            <div class="collection-section-title">Предметы</div>
+            <div id="collectionItemsGrid" class="collection-items-grid"></div>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -174,6 +228,21 @@
       <div class="dialog-actions">
         <button class="btn ghost" value="cancel" formnovalidate>Отмена</button>
         <button id="btnCreateSeries" class="btn primary" value="ok">Создать</button>
+      </div>
+      <div class="dialog-small">Название можно изменить позже.</div>
+    </form>
+  </dialog>
+
+  <dialog id="dlgNewCollection" class="dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-title">Новая коллекция</div>
+      <label class="field">
+        <span>Название (необязательно)</span>
+        <input id="newCollectionName" type="text" placeholder="Можно оставить пустым" maxlength="60" />
+      </label>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Отмена</button>
+        <button id="btnCreateCollection" class="btn primary" value="ok">Создать</button>
       </div>
       <div class="dialog-small">Название можно изменить позже.</div>
     </form>
@@ -251,6 +320,6 @@
   </dialog>
 
   <script src="app.js" type="module"></script>
-  <div class="version-badge" id="versionBadge">v0.4.2.4</div>
+  <div class="version-badge" id="versionBadge">v0.4.3.0</div>
 </body>
 </html>
