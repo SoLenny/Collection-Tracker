@@ -1,4 +1,4 @@
-const VERSION = "v0.4.2.3";
+const VERSION = "v0.4.2.4";
 // Collection Tracker v4.2
 // - Series page: multiple images per collection (flat)
 // - All images visible on the collection screen
@@ -1107,6 +1107,15 @@ function drawImageBlock(block){
   if (!ctx) return;
   const bg = getCanvasFillColor(block.canvas.parentElement, "rgba(255,255,255,0.04)");
   ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+  ctx.setLineDash([]);
+  ctx.clearRect(0, 0, block.canvas.width, block.canvas.height);
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, block.canvas.width, block.canvas.height);
   ctx.restore();

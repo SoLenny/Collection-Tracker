@@ -1,4 +1,4 @@
-const CACHE="collection-tracker-v4.1.5";
+const CACHE="collection-tracker-v4.2.4";
 const ASSETS=["./","./index.html","./styles.css","./app.js","./manifest.webmanifest","./icon-192.png","./icon-512.png"];
 self.addEventListener("install",e=>{e.waitUntil((async()=>{const c=await caches.open(CACHE);await c.addAll(ASSETS);self.skipWaiting();})())});
 self.addEventListener("activate",e=>{e.waitUntil((async()=>{const ks=await caches.keys();await Promise.all(ks.map(k=>k===CACHE?null:caches.delete(k)));self.clients.claim();})())});
